@@ -275,6 +275,26 @@ class OpticalReaderSolverGUI:
     # Solver mode
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _clear_transient_state(self, reason=""):
+        """
+        Full reset of every cache that's only valid for the CURRENT capture
+        configuration (which screen region + which mode). Previously a
+        Fast/Standard switch only cleared answer_cache, and loading a
+        coordinate profile cleared nothing at all — so session_cache and
+        frame_answer_cache (keyed on pixel hashes from the OLD region/mode)
+        could keep serving answers that have nothing to do with what's now
+        on screen. Any change to what we're capturing or how we solve it
+        should invalidate all of these together.
+        """
+        self.core.answer_cache.clear()
+        self.core.session_cache.clear()
+        self.frame_answer_cache.clear()
+        self.last_frame_hash    = None
+        self.core.last_question = ""
+        self.update_cache_label(0)
+        if reason:
+            print(f"[GUI] Cleared session/frame cache ({reason})")
+
     def _set_solver_mode(self, mode):
         self.core.solve_mode = mode
         for m, (btn, active_style) in self._mode_pills.items():
@@ -309,9 +329,9 @@ class OpticalReaderSolverGUI:
                                      else STANDARD_MODE_POLLING)
         label = "FAST · 10 ms" if self.core.fast_mode else "STANDARD · 150 ms"
         self.mode_label.config(text=label)
-        # Clear session cache on mode switch (LUT is untouched)
-        self.core.answer_cache.clear()
-        self.update_cache_label(0)
+        # Clear ALL transient state on mode switch (LUT is untouched — it's
+        # persistent and mode-independent by design)
+        self._clear_transient_state(f"mode → {label}")
         self.set_auto_status("")
         self.core.extended_sequence_active = False
         # Update OCR box size
@@ -341,12 +361,9 @@ class OpticalReaderSolverGUI:
         self.core.cancel_all_scheduled_events()
         self.core.answers_count = 0
         self.core.ready_count   = 0
-        self.core.answer_cache.clear()   # session cache only — LUT is untouched
         self.core.extended_sequence_active = False
-        self.frame_answer_cache.clear()  # stale frame→answer mappings from old game
-        self.last_frame_hash = None      # force fresh evaluation on next frame
+        self._clear_transient_state("manual reset")
         self.update_counter_label(0, 0)
-        self.update_cache_label(0)
         self.set_auto_status("")
 
     def _toggle_automation(self):
@@ -460,6 +477,13 @@ class OpticalReaderSolverGUI:
         ok = self.core.load_coord_slot(idx)
         if ok:
             self.active_slot = idx
+            # New coordinates mean a totally different screen region — any
+            # cached frame hash / session answer from the old region is
+            # meaningless (and dangerous: the same pixel hash is very
+            # unlikely but the same STALE answer being auto-clicked into a
+            # different question is exactly the kind of bug that's hard to
+            # notice until it's already clicked something wrong).
+            self._clear_transient_state(f"coordinate slot {idx+1} loaded")
             self._rebuild_overlays()
             self.status_label.config(text="● PAUSED", fg=C_RED)
             self.pause_btn.config(text="▶ Resume")
@@ -478,6 +502,7 @@ class OpticalReaderSolverGUI:
             self._toggle_pause()
         self.core.reset_coords_to_defaults()
         self.active_slot = None
+        self._clear_transient_state("coordinates reset to defaults")
         self._rebuild_overlays()
         self.status_label.config(text="● PAUSED", fg=C_RED)
         print("[GUI] Reset to defaults — click Resume when ready")
@@ -829,8 +854,22 @@ class OpticalReaderSolverGUI:
                             self.core._last_question_reset_id = self.root.after(
                                 50, self._reset_last_question)
 
-                # Cache result (None cached too → no wasted OCR on same anim frame)
-                if len(self.frame_answer_cache) < 500:
+                # Cache successful results only. A failed OCR/solve attempt
+                # used to be cached as (None, None) too — meant to save a
+                # wasted OCR pass on a repeated animation frame, but it also
+                # meant one bad frame (blur, glare, a half-drawn digit) could
+                # get its failure "stuck": if those exact pixels reappeared
+                # later, OCR would be skipped and the earlier failure reused
+                # instead of trying again. A skipped OCR pass is cheap; a
+                # permanently unsolvable question is not.
+                if answer is not None:
+                    # Evict the oldest entry instead of refusing new ones once
+                    # full — dict preserves insertion order, so this is a
+                    # simple FIFO/LRU-ish cap. Previously the cache just
+                    # stopped accepting new frames forever once it hit 500.
+                    if len(self.frame_answer_cache) >= 500:
+                        oldest = next(iter(self.frame_answer_cache))
+                        del self.frame_answer_cache[oldest]
                     self.frame_answer_cache[current_hash] = (answer, source)
 
                 # ── 5. UI preview — PIL only if enabled ───────────────────────

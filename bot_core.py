@@ -16,6 +16,10 @@ import sys
 import os
 import json
 import ctypes
+import ctypes.wintypes  # must be imported explicitly — accessing
+                         # ctypes.wintypes without this only worked before
+                         # because some other import happened to pull it in
+                         # as a side effect; that's not guaranteed.
 import threading
 from pynput import keyboard as pynput_keyboard
 
@@ -220,6 +224,11 @@ class BotCore:
         # Persistent LUT — loaded from disk, never cleared except by user action
         self.lut        = self._load_lut()
         self._lut_dirty = False
+        # Serializes disk writes and lets a late-finishing stale write detect
+        # that a newer one has since been queued and skip itself, instead of
+        # two concurrent writers racing and the older one winning last.
+        self._lut_write_lock = threading.Lock()
+        self._lut_write_seq  = 0
 
         # Pre-compiled regex
         self._op_clean  = re.compile(r'[^\d\s\+\-\*/\(\)=?]')
@@ -324,11 +333,22 @@ class BotCore:
         return self._op_clean.sub('', expr)
 
     def fix_missing_operator(self, expr):
-        if '(' not in expr and ')' not in expr and '+' in expr:
-            return expr.replace('+', '/', 1)
-        m = self._div_pat.search(expr)
-        if m:
-            return f"{m.group(1)} / {m.group(2)} = ?"
+        """
+        Heuristic repair for an operator OCR dropped entirely (leaving two
+        number groups separated only by whitespace).
+
+        Previously this treated EVERY '+' with no parens as a misread '/' —
+        that's wrong far more often than it's right (it corrupted plain
+        addition like "7+6" into "7/6"). '+' is a real, unambiguous
+        character once OCR reads it; there's no evidence a genuinely-read
+        '+' should ever be reinterpreted as something else, so that branch
+        is removed entirely.
+
+        The only remaining repair is for a dropped operator between two
+        bare number groups (e.g. "123 4 = ?"), which we treat as implicit
+        multiplication — the safer default, since division would need to
+        guess digit-grouping that OCR gives no evidence for.
+        """
         return self._mult_pat.sub(r"\1 * \2", expr, count=1)
 
     def finalize_expression(self, expr):
@@ -384,47 +404,59 @@ class BotCore:
 
     # ── Unified solve pipeline ────────────────────────────────────────────────
 
-    def solve_math(self, raw_text):
+    def solve_math(self, expr):
         """
         Unified high-speed solving pipeline.
-        Priority order:
-          1. clean_hallucinations (OCR fix + anchored smart strip)
-          2. LUT        — permanent JSON cache, instant dict lookup
-          3. session_cache — in-memory, populated during this round
-          4. eval()     — pure arithmetic, ~57× faster than SymPy
-          5. SymPy      — algebraic equations with '?' only
-        Results are stored in session_cache so the same question
-        never hits eval/SymPy more than once per round.
-        """
-        expr = self.clean_hallucinations(raw_text)
-        if not expr:
-            return None
 
-        # Fast mode: strip any leftover '=' or '?' to guarantee a bare key
-        if self.fast_mode:
-            expr = re.sub(r'[=?]', '', expr).strip()
+        IMPORTANT: `expr` must already be the fully-normalised expression
+        (the output of self.normalise(), fast-mode-stripped by the caller) —
+        the SAME string that gets used as the LUT/session-cache key.
+
+        Previously this method re-derived its own key by running only
+        clean_hallucinations() on the raw OCR text, while handle_question()
+        stored results under a DIFFERENT key built by the full normalise()
+        pipeline (which also runs fix_missing_operator/normalize_operators).
+        Those two pipelines could disagree — e.g. solve_math would correctly
+        eval "7+6" = 13, but it would get written to the LUT under the key
+        "7/6" (because fix_missing_operator rewrote the '+' to '/' for the
+        *key* but the '+' → 13 result had already been computed). A later,
+        genuine "7/6" question would then hit the LUT and get told the
+        answer is 13. Using one shared, already-normalised string for both
+        the computation AND the cache key removes that whole class of bug.
+
+        Priority order:
+          1. LUT        — permanent JSON cache, instant dict lookup
+          2. session_cache — in-memory, populated during this round
+          3. eval()     — pure arithmetic, ~57× faster than SymPy
+          4. SymPy      — algebraic equations with '?' only
+        Returns (answer, source) where source is 'lut' | 'cache' | 'solve' | None.
+        """
         if not expr:
-            return None
+            return None, None
 
         # 1. LUT — permanent JSON cache
         if expr in self.lut:
-            return self.lut[expr]
+            return self.lut[expr], 'lut'
 
         # 2. Session cache — current round memory
         if expr in self.session_cache:
-            return self.session_cache[expr]
+            return self.session_cache[expr], 'cache'
 
         # 3. eval() fast path — pure arithmetic (no '=' or '?')
         if '=' not in expr and '?' not in expr:
             try:
                 result = eval(expr, {"__builtins__": {}})
+                # The on-screen keypad only has digit keys, so a non-integer
+                # result can't be entered — treat it as unsolved rather than
+                # silently rounding/truncating to a wrong integer.
                 answer = int(result) if float(result).is_integer() else None
                 if answer is not None:
                     self.session_cache[expr] = answer
-                return answer
+                    return answer, 'solve'
+                return None, None
             except Exception as e:
                 print(f"[CORE] eval error on '{expr}': {e}", file=sys.stderr)
-                return None
+                return None, None
 
         # 4. SymPy — algebraic equations
         try:
@@ -432,13 +464,18 @@ class BotCore:
             lhs, rhs = algebra_expr.split('==')
             sol = solve(Eq(sympify(lhs), sympify(rhs)), self._x)
             if sol:
-                answer = int(float(N(sol[0])))
-                self.session_cache[expr] = answer
-                return answer
+                result = N(sol[0])
+                # Same keypad constraint as above: don't truncate a
+                # non-integer solution into a confidently wrong integer.
+                if result.is_integer:
+                    answer = int(result)
+                    self.session_cache[expr] = answer
+                    return answer, 'solve'
+                return None, None
         except Exception as e:
             print(f"[CORE] SymPy error on '{expr}': {e}", file=sys.stderr)
 
-        return None
+        return None, None
 
     # ── Question handling (called from GUI main_loop) ──────────────────────────
 
@@ -492,14 +529,18 @@ class BotCore:
                 return int(answer), 'solve'
             return None, None
 
-        # ── MODE: Hybrid — session cache → LUT → solve_math ─────────────────────
-        # solve_math internally checks LUT → session_cache → eval → SymPy
-        answer = self.solve_math(raw_ocr)
+        # ── MODE: Hybrid — LUT → session cache → eval → SymPy ────────────────
+        # `norm` was already computed above via self.normalise() (+ the same
+        # fast-mode strip applied everywhere else) — solve_math uses that
+        # exact string as its key, so whatever gets written to the LUT here
+        # is guaranteed to be the same key a later identical question will
+        # look itself up under. `source` now reflects where the answer
+        # actually came from instead of always being hard-coded to 'solve'.
+        answer, source = self.solve_math(norm)
         if answer is not None:
-            self._lut_record(self.normalise(raw_ocr) if not self.fast_mode
-                             else re.sub(r'[=?]', '', self.normalise(raw_ocr)).strip(),
-                             int(answer))
-            return int(answer), 'solve'
+            if source == 'solve':
+                self._lut_record(norm, int(answer))
+            return int(answer), source
 
         return None, None
 
@@ -524,22 +565,31 @@ class BotCore:
                     self.ui.root.after(2000, lambda: self.ui.set_auto_status("", "gray"))
 
             answer_str = str(int(answer))
-            print(f"[CORE] [{source.upper()}] Clicking: {answer_str}")
 
-            if not all(d in self.key_coords for d in answer_str):
-                print(f"[CORE] [SKIP] '{answer_str}' has unmapped chars")
-                return
+            # ── Global safety switch ───────────────────────────────────────────
+            # This is the ONLY place that actually issues clicks for an answer,
+            # so it's the one place that must respect automation_enabled.
+            # Bookkeeping (session cache, counters) below still runs — the bot
+            # still "knows" the answer — it just never touches the mouse.
+            if not self.automation_enabled:
+                print(f"[CORE] [{source.upper()}] Automation OFF — not clicking {answer_str}")
+            else:
+                print(f"[CORE] [{source.upper()}] Clicking: {answer_str}")
 
-            for d in answer_str:
-                x, y = self.key_coords[d]
-                fast_click(x, y)
-                if KEY_PRESS_DELAY > 0:
-                    time.sleep(KEY_PRESS_DELAY)
+                if not all(d in self.key_coords for d in answer_str):
+                    print(f"[CORE] [SKIP] '{answer_str}' has unmapped chars")
+                    return
 
-            ok_x, ok_y = self.key_coords['OK']
-            fast_click(ok_x, ok_y)
-            if POST_ANSWER_DELAY > 0:
-                time.sleep(POST_ANSWER_DELAY)
+                for d in answer_str:
+                    x, y = self.key_coords[d]
+                    fast_click(x, y)
+                    if KEY_PRESS_DELAY > 0:
+                        time.sleep(KEY_PRESS_DELAY)
+
+                ok_x, ok_y = self.key_coords['OK']
+                fast_click(ok_x, ok_y)
+                if POST_ANSWER_DELAY > 0:
+                    time.sleep(POST_ANSWER_DELAY)
 
             # ── Update session cache ──────────────────────────────────────────
             # Record every answered question in the session cache (fast mode).
@@ -675,16 +725,30 @@ class BotCore:
         return {}
 
     def _save_lut_async(self):
-        """Write LUT to disk on a daemon thread — never blocks the main loop."""
+        """
+        Write LUT to disk on a daemon thread — never blocks the main loop.
+
+        Every call gets a sequence number. If two writes are ever in flight
+        at once, whichever one is *not* the latest checks self._lut_write_seq
+        right before writing (under the lock) and bails out instead of
+        writing — so an older, smaller snapshot can never overwrite a newer
+        one just because its thread happened to get scheduled second.
+        """
+        self._lut_write_seq += 1
+        seq = self._lut_write_seq
         snapshot = dict(self.lut)
         self._lut_dirty = False
-        def _write(snap):
+        def _write(snap, seq):
             try:
-                with open(LUT_FILE, 'w') as f:
-                    json.dump(snap, f, indent=2)
+                with self._lut_write_lock:
+                    if seq != self._lut_write_seq:
+                        print(f"[CORE] LUT write #{seq} superseded — skipping")
+                        return
+                    with open(LUT_FILE, 'w') as f:
+                        json.dump(snap, f, indent=2)
             except Exception as e:
                 print(f"[CORE] LUT save error: {e}")
-        threading.Thread(target=_write, args=(snapshot,), daemon=True).start()
+        threading.Thread(target=_write, args=(snapshot, seq), daemon=True).start()
 
     def _lut_record(self, norm, answer):
         """Store a fresh solve result in the LUT and persist to disk.
@@ -701,6 +765,10 @@ class BotCore:
     def clear_lut(self):
         """Called by the GUI Clear LUT button. Only wipes the LUT — session cache is unaffected."""
         self.lut.clear()
+        # Invalidate any write already queued on a background thread — without
+        # this, a snapshot taken just before Clear was pressed can finish
+        # writing just after and silently recreate the file we just deleted.
+        self._lut_write_seq += 1
         try:
             if os.path.exists(LUT_FILE):
                 os.remove(LUT_FILE)

@@ -233,7 +233,6 @@ class BotCore:
         # Pre-compiled regex
         self._op_clean  = re.compile(r'[^\d\s\+\-\*/\(\)=?]')
         self._sp_clean  = re.compile(r'\s*([\+\-\*/\(\)=])\s*')
-        self._div_pat   = re.compile(r"(\d{3})\s+(\d{1,2})\s*=\s*\?")
         self._mult_pat  = re.compile(r"(\d+)\s+(\d+)")
         self._x         = symbols('x')
 
@@ -595,7 +594,15 @@ class BotCore:
             # Record every answered question in the session cache (fast mode).
             # This is what makes cache hits happen for repeated questions within
             # a round — completely independent of the LUT.
-            norm = self.normalise(self.last_question) if self.last_question else None
+            # Must build this key exactly the way handle_question() does (full
+            # normalise() + the fast-mode '=' / '?' strip), or a question can
+            # get written here under one key and looked up under another —
+            # e.g. "7+6=" here vs "7+6" there — so it never actually hits.
+            norm = None
+            if self.last_question:
+                norm = self.normalise(self.last_question)
+                if self.fast_mode:
+                    norm = re.sub(r'[=?]', '', norm).strip()
             if norm and self.fast_mode and norm not in self.answer_cache:
                 self.answer_cache[norm] = int(answer)
                 if self.ui:

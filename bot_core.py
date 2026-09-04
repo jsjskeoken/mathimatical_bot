@@ -198,6 +198,14 @@ class BotCore:
         self.last_question            = ""
         self._last_question_reset_id  = None
         self.paused                   = False
+        # HWND of whatever window was in the foreground the moment the bot was
+        # last resumed — captured via GetForegroundWindow(), a plain OS
+        # window-manager query. It doesn't read anything from inside the
+        # target app (no DOM, no accessibility tree, no injected code), so it
+        # stays within "completely external": we're only ever asking Windows
+        # "which window currently has focus", the same way SetCursorPos only
+        # ever asks Windows to move the cursor.
+        self.target_hwnd              = None
         self.fast_mode                = True
         self.current_polling          = FAST_MODE_POLLING
         self.solve_mode               = MODE_HYBRID
@@ -263,6 +271,20 @@ class BotCore:
         listener.start()
         print(f"[CORE] Hotkey listener active — press {PAUSE_HOTKEY} to toggle pause")
 
+    def _capture_target_window(self):
+        """
+        Record whichever window currently has focus as the click target.
+        Call this at the moment automation resumes — right after you've
+        alt-tabbed into the target app — not before, or you'll capture your
+        own editor/terminal instead.
+        """
+        try:
+            self.target_hwnd = ctypes.windll.user32.GetForegroundWindow()
+            print(f"[CORE] Target window captured: {self.target_hwnd}")
+        except Exception as e:
+            self.target_hwnd = None
+            print(f"[CORE] Could not capture target window: {e}")
+
     def _hotkey_toggle_pause(self):
         """
         Called from the pynput listener thread.
@@ -272,6 +294,8 @@ class BotCore:
         self.paused = not self.paused
         state = "PAUSED" if self.paused else "RUNNING"
         print(f"[HOTKEY] Bot {state}")
+        if not self.paused:
+            self._capture_target_window()
         if self.ui:
             # root.after is thread-safe; directly touching widgets is not
             self.ui.root.after(0, self.ui.sync_pause_state)
@@ -573,6 +597,21 @@ class BotCore:
             if not self.automation_enabled:
                 print(f"[CORE] [{source.upper()}] Automation OFF — not clicking {answer_str}")
             else:
+                # Guard against clicking into the wrong window — e.g. the
+                # target app lost focus (alt-tab, a popup grabbed focus, the
+                # user clicked elsewhere). This only asks the OS which window
+                # currently has focus; it never reads anything from inside
+                # the target app itself, so it's the same "external" category
+                # as SetCursorPos — just a check instead of an action.
+                if self.target_hwnd is not None:
+                    current_hwnd = ctypes.windll.user32.GetForegroundWindow()
+                    if current_hwnd != self.target_hwnd:
+                        print(f"[CORE] [SKIP] Target window not focused "
+                              f"(expected {self.target_hwnd}, got {current_hwnd}) — not clicking")
+                        if self.ui:
+                            self.ui.set_auto_status("⚠ Target window lost focus — not clicking", "orange")
+                        return
+
                 print(f"[CORE] [{source.upper()}] Clicking: {answer_str}")
 
                 if not all(d in self.key_coords for d in answer_str):

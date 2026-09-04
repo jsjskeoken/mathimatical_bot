@@ -11,6 +11,7 @@ import hashlib
 import numpy as np
 import ctypes
 import datetime
+import time
 
 from bot_core import (
     BotCore,
@@ -73,6 +74,17 @@ class OpticalReaderSolverGUI:
         # microseconds.  Transition frames are cached as (None, None) so OCR is
         # never wasted on them either.  Capped at 500 entries.
         self.frame_answer_cache = {}
+
+        # ── Click confirmation ──────────────────────────────────────────────
+        # We already hash every frame anyway (for the frame-answer-cache) —
+        # reuse that to check whether the screen actually changed after a
+        # click, instead of assuming click_answer() worked just because it
+        # didn't raise.
+        self._pending_confirm_hash     = None  # frame hash right before the click
+        self._pending_confirm_deadline = None  # time.time() by which we expect a change
+        self._consecutive_unconfirmed  = 0
+        self.CONFIRM_TIMEOUT      = 0.5  # seconds to wait for the screen to change
+        self.UNCONFIRMED_THRESHOLD = 3   # auto-disable automation after this many in a row
 
         self._build_root()
         self._build_gui()
@@ -317,6 +329,7 @@ class OpticalReaderSolverGUI:
         else:
             self.status_label.config(text="● RUNNING", fg=C_GREEN)
             self.pause_btn.config(text="⏸ Pause")
+            self.core._capture_target_window()
             # If user resumes while save-pending, cancel that state
             if self._edit_save_pending:
                 self._edit_save_pending = False
@@ -366,9 +379,14 @@ class OpticalReaderSolverGUI:
         self.update_counter_label(0, 0)
         self.set_auto_status("")
 
-    def _toggle_automation(self):
-        self.core.automation_enabled = not self.core.automation_enabled
-        if self.core.automation_enabled:
+    def _set_automation_enabled(self, enabled, reason=""):
+        """
+        Single place that flips automation on/off and updates the button —
+        used by the manual toggle AND by the auto-pause-on-unconfirmed-clicks
+        safety net, so both stay visually consistent.
+        """
+        self.core.automation_enabled = enabled
+        if enabled:
             self.auto_btn.config(text="🤖 Automation: ON",
                                  fg=C_GREEN, bg="#1e3a1e")
             print("[GUI] Automation ENABLED")
@@ -378,8 +396,15 @@ class OpticalReaderSolverGUI:
             self.core.extended_sequence_active = False
             self.auto_btn.config(text="🤖 Automation: OFF",
                                  fg=C_MUTED, bg="#2a2a2a")
-            self.set_auto_status("")
-            print("[GUI] Automation DISABLED — all sequences cancelled")
+            if reason:
+                self.set_auto_status(reason, "red")
+            else:
+                self.set_auto_status("")
+            print(f"[GUI] Automation DISABLED — all sequences cancelled"
+                  + (f" ({reason})" if reason else ""))
+
+    def _toggle_automation(self):
+        self._set_automation_enabled(not self.core.automation_enabled)
 
     def _toggle_preview(self):
         self.core.preview_enabled = not self.core.preview_enabled
@@ -805,6 +830,30 @@ class OpticalReaderSolverGUI:
 
                 # ── 2. Hash on native BGRA buffer (zero-copy) ─────────────────
                 current_hash = hashlib.md5(sct_img.bgra).hexdigest()
+
+                # ── Click confirmation ─────────────────────────────────────────
+                # Runs BEFORE the "unchanged frame" early-return below, since
+                # an unchanged frame after a click is exactly the failure case
+                # we're checking for (the click didn't land, or landed on the
+                # wrong window, and nothing on screen moved).
+                if self._pending_confirm_hash is not None:
+                    if current_hash != self._pending_confirm_hash:
+                        # Screen moved on since the click — good enough
+                        # confirmation without needing to know *why* it moved.
+                        self._pending_confirm_hash = None
+                        self._consecutive_unconfirmed = 0
+                    elif time.time() >= self._pending_confirm_deadline:
+                        self._pending_confirm_hash = None
+                        self._consecutive_unconfirmed += 1
+                        print(f"[GUI] [WARN] Click unconfirmed — screen unchanged "
+                              f"after click ({self._consecutive_unconfirmed}/"
+                              f"{self.UNCONFIRMED_THRESHOLD})")
+                        if self._consecutive_unconfirmed >= self.UNCONFIRMED_THRESHOLD:
+                            self._set_automation_enabled(
+                                False,
+                                f"⚠ {self.UNCONFIRMED_THRESHOLD} unconfirmed clicks — automation paused")
+                            self._consecutive_unconfirmed = 0
+
                 if current_hash == self.last_frame_hash:
                     self.root.after(self.core.current_polling, self._main_loop)
                     return
@@ -816,6 +865,9 @@ class OpticalReaderSolverGUI:
                     if cached_answer is not None and self.core.last_question == "":
                         print(f"[GUI] [FRAME CACHE] {cached_answer}")
                         self.core.click_answer(cached_answer, cached_source)
+                        if self.core.automation_enabled:
+                            self._pending_confirm_hash     = current_hash
+                            self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
                         if self.core._last_question_reset_id is not None:
                             try:
                                 self.root.after_cancel(
@@ -845,6 +897,9 @@ class OpticalReaderSolverGUI:
                         answer, source = self.core.handle_question(raw)
                         if answer is not None:
                             self.core.click_answer(answer, source)
+                            if self.core.automation_enabled:
+                                self._pending_confirm_hash     = current_hash
+                                self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
                             if self.core._last_question_reset_id is not None:
                                 try:
                                     self.root.after_cancel(

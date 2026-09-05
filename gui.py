@@ -29,17 +29,65 @@ WS_EX_TRANSPARENT = 0x00000020
 WS_EX_LAYERED     = 0x00080000
 GWL_EXSTYLE       = -20
 
-# ── Colour palette ────────────────────────────────────────────────────────────
-C_BG       = "#1e1e2e"   # dark background
-C_SURFACE  = "#2a2a3e"   # card/panel
-C_BORDER   = "#44446a"   # subtle border
-C_ACCENT   = "#7c6af7"   # purple accent
-C_GREEN    = "#50fa7b"
-C_RED      = "#ff5555"
-C_ORANGE   = "#ffb86c"
-C_CYAN     = "#8be9fd"
-C_FG       = "#cdd6f4"   # foreground text
-C_MUTED    = "#6c7086"   # muted labels
+# ─────────────────────────────────────────────────────────────────────────────
+# Design tokens — the single source of truth for every colour/font/spacing
+# value used below. Nothing past this block should hardcode a one-off hex
+# code or point size; add a token here instead so the whole app stays
+# visually consistent and themeable from one place.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Colour — dark utility palette. The purple accent is the one saturated
+# colour in the UI; everything else is either neutral or a single-purpose
+# status colour (success/warning/danger), so nothing competes with it.
+C_BG          = "#14141c"   # app background
+C_SURFACE     = "#1c1c28"   # primary card
+C_SURFACE_ALT = "#20202e"   # secondary panel (advanced area, modals)
+C_BORDER      = "#32324a"   # card/section border
+C_DIVIDER     = "#26263a"   # hairline between rows within a card
+
+C_ACCENT       = "#7c6af7"  # primary accent — mode selection, primary button
+C_ACCENT_HOVER = "#9384fa"
+
+C_GREEN   = "#4ade80"   # success / running / enabled
+C_GREEN_BG = "#1c3326"
+C_RED     = "#f87171"   # danger / paused / disabled
+C_RED_BG  = "#3a2222"
+C_ORANGE  = "#fbbf24"   # warning — used sparingly, never as a default state
+C_CYAN    = "#67e8f9"   # informational accent — "live" indicator only
+
+C_FG        = "#e6e6f0"  # primary text
+C_MUTED     = "#8a8aa3"  # secondary text / labels
+C_MUTED_DIM = "#5c5c73"  # tertiary / helper text
+
+# Typography — one Windows-safe family; hierarchy comes from size/weight,
+# not from mixing typefaces. A monospace face is used only where alignment
+# of digits actually matters (the detected expression / result).
+FONT_FAMILY = "Segoe UI"
+FONT_MONO   = "Consolas"
+
+F_STATUS   = (FONT_FAMILY, 13, "bold")   # the one big "what's happening" line
+F_SECTION  = (FONT_FAMILY, 8,  "bold")   # section headings (Solver Mode, Advanced…)
+F_BODY     = (FONT_FAMILY, 9)            # buttons, normal controls
+F_BODY_B   = (FONT_FAMILY, 9,  "bold")
+F_LABEL    = (FONT_FAMILY, 8)            # secondary labels
+F_HELPER   = (FONT_FAMILY, 7)            # meta/helper text, mode subtitles
+F_RESULT   = (FONT_MONO,   16, "bold")   # the solved answer — biggest number on screen
+F_DETECTED = (FONT_MONO,   10)           # the raw detected expression
+
+# Spacing scale (px) — every pack/grid padding below is one of these.
+SP_1, SP_2, SP_3, SP_4 = 4, 8, 12, 16
+
+# Button colour system — a handful of named *kinds* rather than one-off
+# colours per button, so "this is primary" / "this is dangerous" reads
+# consistently everywhere.
+BTN_KINDS = {
+    "primary":   {"bg": C_ACCENT,     "fg": "#ffffff", "hover": C_ACCENT_HOVER},
+    "secondary": {"bg": C_SURFACE_ALT,"fg": C_FG,       "hover": C_BORDER},
+    "ghost":     {"bg": C_SURFACE,    "fg": C_MUTED,    "hover": C_SURFACE_ALT},
+    "success":   {"bg": C_GREEN_BG,   "fg": C_GREEN,    "hover": "#24432f"},
+    "danger":    {"bg": C_RED_BG,     "fg": C_RED,      "hover": "#472a2a"},
+    "muted_off": {"bg": C_SURFACE_ALT,"fg": C_MUTED,    "hover": C_BORDER},
+}
 
 
 class OpticalReaderSolverGUI:
@@ -65,14 +113,18 @@ class OpticalReaderSolverGUI:
         self._resize_handles    = []
         self.active_slot        = None
 
+        # Advanced section — collapsed by default so the window opens
+        # showing only what you need for a normal run (status, preview,
+        # pause/automation, mode). Everything else is one click away.
+        self._advanced_visible = False
+
         # High-speed screen capture — mss is 3-5× faster than PIL screen capture
         self._sct             = mss.mss()
         # MD5 of the last captured frame — if unchanged, skip OCR entirely
         self.last_frame_hash  = None
         # Maps frame hash → (answer, source).  After the first OCR pass for any
         # question, subsequent appearances skip EasyOCR entirely and answer in
-        # microseconds.  Transition frames are cached as (None, None) so OCR is
-        # never wasted on them either.  Capped at 500 entries.
+        # microseconds.  Capped at 500 entries (oldest evicted first).
         self.frame_answer_cache = {}
 
         # ── Click confirmation ──────────────────────────────────────────────
@@ -83,8 +135,8 @@ class OpticalReaderSolverGUI:
         self._pending_confirm_hash     = None  # frame hash right before the click
         self._pending_confirm_deadline = None  # time.time() by which we expect a change
         self._consecutive_unconfirmed  = 0
-        self.CONFIRM_TIMEOUT      = 0.5  # seconds to wait for the screen to change
-        self.UNCONFIRMED_THRESHOLD = 3   # auto-disable automation after this many in a row
+        self.CONFIRM_TIMEOUT       = 0.5  # seconds to wait for the screen to change
+        self.UNCONFIRMED_THRESHOLD = 3    # auto-disable automation after this many in a row
 
         self._build_root()
         self._build_gui()
@@ -98,22 +150,68 @@ class OpticalReaderSolverGUI:
     def _build_root(self):
         self.root = tk.Tk()
         self.root.title("Optical Reader & Solver")
-        self.root.geometry("310x540+50+50")
+        self.root.geometry("340x50+50+50")   # height is set for real once content is built
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=C_BG)
 
-        # Custom ttk style for the solver-mode radio buttons
+        # Custom ttk style for the solver-mode segmented control
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        for name, bg in [("Hybrid.TButton", C_ACCENT),
-                          ("Calc.TButton",   "#44b5a0"),
-                          ("Lut.TButton",    "#e07b54"),
-                          ("Inactive.TButton", C_SURFACE)]:
-            style.configure(name, background=bg, foreground="white",
-                            font=("Segoe UI", 8, "bold"), padding=3,
+        for name, bg, fg in [
+            ("ModeActive.TButton",   C_ACCENT,     "#ffffff"),
+            ("ModeInactive.TButton", C_SURFACE_ALT, C_MUTED),
+        ]:
+            style.configure(name, background=bg, foreground=fg,
+                            font=F_BODY, padding=(SP_2, SP_2),
                             relief="flat", borderwidth=0)
             style.map(name, background=[("active", bg)])
+
+    def _resize_to_fit(self):
+        """
+        Re-fit the fixed-size window to whatever's currently packed —
+        called after toggling the Advanced section (or anything else that
+        changes how much vertical content exists), so the window grows or
+        shrinks instead of clipping content or leaving dead space.
+        """
+        self.root.update_idletasks()
+        w = self.root.winfo_reqwidth()
+        h = self.root.winfo_reqheight()
+        self.root.geometry(f"{w}x{h}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Small reusable widget builders — keeps every card/button/section
+    # visually consistent without repeating style kwargs everywhere.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _card(self, parent, bg=C_SURFACE, inner_padx=SP_3, inner_pady=SP_2,
+              outer_padx=SP_3, outer_pady=(SP_2, 0)):
+        card = tk.Frame(parent, bg=bg, padx=inner_padx, pady=inner_pady)
+        card.pack(fill="x", padx=outer_padx, pady=outer_pady)
+        return card
+
+    def _section_label(self, parent, text):
+        return tk.Label(parent, text=text.upper(), fg=C_MUTED, bg=parent["bg"],
+                         font=F_SECTION)
+
+    def _style_button(self, btn, kind):
+        """(Re)apply a named colour kind to a button, including live hover
+        feedback. Called at creation and again whenever a stateful button
+        (Automation, Edit) changes what state it represents."""
+        colors = BTN_KINDS[kind]
+        btn.config(fg=colors["fg"], bg=colors["bg"],
+                   activeforeground=colors["fg"], activebackground=colors["hover"])
+        rest, hover = colors["bg"], colors["hover"]
+        btn.bind("<Enter>", lambda e, b=btn, c=hover: b.config(bg=c))
+        btn.bind("<Leave>", lambda e, b=btn, c=rest: b.config(bg=c))
+
+    def _button(self, parent, text, command, kind="secondary", **kw):
+        btn = tk.Button(parent, text=text, command=command,
+                        relief="flat", bd=0, cursor="hand2",
+                        font=kw.pop("font", F_BODY),
+                        padx=SP_3, pady=SP_2, justify="center", **kw)
+        self._style_button(btn, kind)
+        return btn
 
     # ─────────────────────────────────────────────────────────────────────────
     # GUI layout
@@ -122,153 +220,197 @@ class OpticalReaderSolverGUI:
     def _build_gui(self):
         root = self.root
 
-        # ── Status card ──────────────────────────────────────────────────────
-        card = tk.Frame(root, bg=C_SURFACE, padx=10, pady=6)
-        card.pack(fill="x", padx=10, pady=(10, 4))
+        # ── Status card — the single most important thing on screen: is it
+        # running, and what has it just seen? ─────────────────────────────
+        status_card = self._card(root, outer_pady=(SP_3, 0))
 
-        # Row 0: status badge + mode label
-        self.status_label = tk.Label(card, text="● RUNNING",
-                                     fg=C_GREEN, bg=C_SURFACE,
-                                     font=("Segoe UI", 11, "bold"))
-        self.status_label.grid(row=0, column=0, sticky="w")
+        top_row = tk.Frame(status_card, bg=C_SURFACE)
+        top_row.pack(fill="x")
+        self.status_label = tk.Label(top_row, text="●  Running",
+                                     fg=C_GREEN, bg=C_SURFACE, font=F_STATUS)
+        self.status_label.pack(side="left")
+        self.mode_label = tk.Label(top_row, text="FAST",
+                                   fg=C_MUTED, bg=C_SURFACE, font=F_LABEL)
+        self.mode_label.pack(side="right", anchor="s", pady=(0, 2))
 
-        self.mode_label = tk.Label(card, text="FAST · 10 ms",
-                                   fg=C_ACCENT, bg=C_SURFACE,
-                                   font=("Segoe UI", 9))
-        self.mode_label.grid(row=0, column=1, sticky="e", padx=(10, 0))
-        card.columnconfigure(1, weight=1)
+        tk.Frame(status_card, bg=C_DIVIDER, height=1).pack(fill="x", pady=(SP_2, SP_2))
 
-        # Row 1: counters
-        self.counter_label = tk.Label(card, text="Answers: 0/10  Ready: 0",
-                                      fg=C_ORANGE, bg=C_SURFACE,
-                                      font=("Segoe UI", 8))
-        self.counter_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        meta1 = tk.Frame(status_card, bg=C_SURFACE)
+        meta1.pack(fill="x")
+        self.counter_label = tk.Label(meta1, text="Answers 0/10  ·  Ready 0",
+                                      fg=C_MUTED, bg=C_SURFACE, font=F_LABEL)
+        self.counter_label.pack(side="left")
 
-        # Row 2: cache + LUT on one line
-        stats_row = tk.Frame(card, bg=C_SURFACE)
-        stats_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        self.cache_label = tk.Label(stats_row,
-                                    text=f"Cache: {len(self.core.answer_cache)}",
-                                    fg="#bd93f9", bg=C_SURFACE, font=("Segoe UI", 8))
+        meta2 = tk.Frame(status_card, bg=C_SURFACE)
+        meta2.pack(fill="x", pady=(2, 0))
+        self.cache_label = tk.Label(meta2, text="Cache 0",
+                                    fg=C_MUTED_DIM, bg=C_SURFACE, font=F_HELPER)
         self.cache_label.pack(side="left")
-        tk.Label(stats_row, text="  ", bg=C_SURFACE).pack(side="left")
-        self.lut_label = tk.Label(stats_row,
-                                  text=f"LUT: {len(self.core.lut)} entries",
-                                  fg=C_GREEN, bg=C_SURFACE, font=("Segoe UI", 8, "bold"))
+        tk.Label(meta2, text="   ", bg=C_SURFACE).pack(side="left")
+        self.lut_label = tk.Label(meta2, text=f"{len(self.core.lut)} saved answers",
+                                  fg=C_MUTED_DIM, bg=C_SURFACE, font=F_HELPER)
         self.lut_label.pack(side="left")
 
-        # Row 3: automation status
-        self.auto_status_label = tk.Label(card, text="", fg=C_MUTED,
-                                          bg=C_SURFACE, font=("Segoe UI", 7))
-        self.auto_status_label.grid(row=3, column=0, columnspan=2, sticky="w")
+        self.auto_status_label = tk.Label(status_card, text="", fg=C_MUTED,
+                                          bg=C_SURFACE, font=F_HELPER, wraplength=290,
+                                          justify="left", anchor="w")
+        self.auto_status_label.pack(fill="x", pady=(SP_1, 0))
 
-        # ── OCR preview ──────────────────────────────────────────────────────
-        prev_card = tk.Frame(root, bg=C_SURFACE, padx=6, pady=4)
-        prev_card.pack(fill="x", padx=10, pady=4)
+        # ── Detected / Result — surfaces what the solver is doing right now
+        # without requiring the person to read the tiny preview image. ─────
+        det_card = self._card(root)
+        det_cols = tk.Frame(det_card, bg=C_SURFACE)
+        det_cols.pack(fill="x")
 
+        det_left = tk.Frame(det_cols, bg=C_SURFACE)
+        det_left.pack(side="left", fill="x", expand=True)
+        self._section_label(det_left, "Detected").pack(anchor="w")
+        self.detected_label = tk.Label(det_left, text="—", fg=C_FG, bg=C_SURFACE,
+                                       font=F_DETECTED, anchor="w")
+        self.detected_label.pack(anchor="w", fill="x")
+
+        det_right = tk.Frame(det_cols, bg=C_SURFACE)
+        det_right.pack(side="right")
+        self._section_label(det_right, "Result").pack(anchor="e")
+        self.result_label = tk.Label(det_right, text="—", fg=C_ACCENT, bg=C_SURFACE,
+                                     font=F_RESULT, anchor="e")
+        self.result_label.pack(anchor="e")
+
+        # ── OCR preview — framed like the "live vision" of the app ─────────
+        prev_card = self._card(root)
         hdr = tk.Frame(prev_card, bg=C_SURFACE)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="OCR Preview", fg=C_MUTED, bg=C_SURFACE,
-                 font=("Segoe UI", 8)).pack(side="left")
-        self.preview_toggle_btn = tk.Button(hdr, text="ON", fg=C_GREEN, bg=C_SURFACE,
-                                            bd=0, font=("Segoe UI", 8, "bold"),
-                                            command=self._toggle_preview,
-                                            cursor="hand2")
+        self._section_label(hdr, "OCR Preview").pack(side="left")
+        self._live_dot = tk.Label(hdr, text="●", fg=C_CYAN, bg=C_SURFACE, font=F_HELPER)
+        self._live_dot.pack(side="left", padx=(SP_1, 0))
+        self.preview_toggle_btn = tk.Button(
+            hdr, text="On", fg=C_GREEN, bg=C_SURFACE, bd=0, font=F_LABEL,
+            activeforeground=C_GREEN, activebackground=C_SURFACE,
+            command=self._toggle_preview, cursor="hand2")
         self.preview_toggle_btn.pack(side="right")
 
-        self.preview_canvas = tk.Canvas(prev_card, width=286, height=60,
-                                        bg="#111122", highlightthickness=1,
-                                        highlightbackground=C_BORDER)
-        self.preview_canvas.pack(pady=(4, 0))
+        preview_frame = tk.Frame(prev_card, bg=C_BORDER, padx=1, pady=1)
+        preview_frame.pack(pady=(SP_2, 0))
+        self.preview_canvas = tk.Canvas(preview_frame, width=286, height=60,
+                                        bg="#0c0c14", highlightthickness=0)
+        self.preview_canvas.pack()
         self.preview_img_tk = None
 
-        # ── Solver-mode pills ─────────────────────────────────────────────────
-        mode_card = tk.Frame(root, bg=C_SURFACE, padx=8, pady=6)
-        mode_card.pack(fill="x", padx=10, pady=4)
-        tk.Label(mode_card, text="Solver Mode", fg=C_MUTED, bg=C_SURFACE,
-                 font=("Segoe UI", 7, "bold")).pack(anchor="w")
+        # ── Primary controls — Pause/Resume and Automation are the two
+        # actions that matter most, so they're the two largest buttons in
+        # the app and nothing else competes with them for attention. ──────
+        primary_card = self._card(root)
+        self.pause_btn = self._button(primary_card, "❚❚  Pause", self._toggle_pause,
+                                      kind="secondary", font=F_BODY_B)
+        self.pause_btn.pack(fill="x")
+
+        self.auto_btn = self._button(
+            primary_card, "Automation\nEnabled", self._toggle_automation,
+            kind="success", font=F_BODY_B)
+        self.auto_btn.pack(fill="x", pady=(SP_2, 0))
+
+        # ── Solver mode — segmented control with a short description of
+        # whichever mode is currently active, instead of assuming the
+        # names ("Hybrid", "LUT") are self-explanatory. ────────────────────
+        mode_card = self._card(root)
+        self._section_label(mode_card, "Solver Mode").pack(anchor="w")
 
         pills = tk.Frame(mode_card, bg=C_SURFACE)
-        pills.pack(fill="x", pady=(4, 0))
+        pills.pack(fill="x", pady=(SP_1, 0))
 
         self._mode_pills = {}
-        defs = [
-            (MODE_HYBRID,   "⚡ Hybrid",    "Hybrid.TButton"),
-            (MODE_CALC,     "🔢 Calc Only", "Calc.TButton"),
-            (MODE_LUT_ONLY, "📖 LUT Only",  "Lut.TButton"),
-        ]
-        for i, (mode, label, style_name) in enumerate(defs):
-            btn = ttk.Button(pills, text=label, style=style_name,
+        self._mode_subtitles = {
+            MODE_HYBRID:   "Fastest — calculates, remembers answers",
+            MODE_CALC:     "Always calculates from scratch",
+            MODE_LUT_ONLY: "Only answers questions seen before",
+        }
+        defs = [(MODE_HYBRID, "Hybrid"), (MODE_CALC, "Calculate"), (MODE_LUT_ONLY, "Saved")]
+        for i, (mode, label) in enumerate(defs):
+            btn = ttk.Button(pills, text=label, style="ModeInactive.TButton",
                              command=lambda m=mode: self._set_solver_mode(m))
-            btn.grid(row=0, column=i, padx=3, sticky="ew")
-            self._mode_pills[mode] = (btn, style_name)
+            btn.grid(row=0, column=i, padx=(0 if i == 0 else SP_1, 0), sticky="ew")
+            self._mode_pills[mode] = (btn, "ModeActive.TButton")
             pills.columnconfigure(i, weight=1)
 
+        self.mode_subtitle_label = tk.Label(mode_card, text="", fg=C_MUTED_DIM,
+                                            bg=C_SURFACE, font=F_HELPER, anchor="w")
+        self.mode_subtitle_label.pack(anchor="w", pady=(SP_1, 0))
+
         self.lut_warn_label = tk.Label(mode_card,
-                                       text="⚠ Will skip unknown questions",
-                                       fg=C_ORANGE, bg=C_SURFACE,
-                                       font=("Segoe UI", 7))
+                                       text="Skips any question it hasn't seen before",
+                                       fg=C_ORANGE, bg=C_SURFACE, font=F_HELPER)
         # (shown/hidden by _set_solver_mode)
 
         self._set_solver_mode(MODE_HYBRID)  # set default highlight
 
-        # ── Control buttons ───────────────────────────────────────────────────
-        btn_card = tk.Frame(root, bg=C_SURFACE, padx=8, pady=6)
-        btn_card.pack(fill="x", padx=10, pady=4)
+        # ── Advanced — everything that isn't a per-round action lives
+        # behind one disclosure toggle, collapsed by default. ──────────────
+        adv_wrap = self._card(root, bg=C_BG, inner_padx=0, inner_pady=0,
+                              outer_pady=(SP_2, SP_3))
 
-        def _btn(parent, text, cmd, fg=C_FG, bg=C_BORDER, **kw):
-            b = tk.Button(parent, text=text, command=cmd, fg=fg, bg=bg,
-                          activeforeground=C_FG, activebackground=C_ACCENT,
-                          relief="flat", bd=0, cursor="hand2",
-                          font=("Segoe UI", 8), padx=6, pady=4, **kw)
-            return b
+        self.advanced_toggle_btn = tk.Button(
+            adv_wrap, text="▸  Advanced", command=self._toggle_advanced,
+            fg=C_MUTED, bg=C_BG, activeforeground=C_FG, activebackground=C_BG,
+            relief="flat", bd=0, cursor="hand2", font=F_LABEL, anchor="w")
+        self.advanced_toggle_btn.pack(fill="x")
 
-        # Row 0: Pause / Mode / Overlays / Reset
-        self.pause_btn  = _btn(btn_card, "⏸ Pause",    self._toggle_pause)
-        self.mode_btn   = _btn(btn_card, "🔄 Mode",     self._toggle_game_mode)
-        overlays_btn    = _btn(btn_card, "👁 Overlays", self._toggle_overlays)
-        reset_btn       = _btn(btn_card, "↺ Reset",     self._reset_counter)
+        self.advanced_frame = tk.Frame(adv_wrap, bg=C_SURFACE_ALT, padx=SP_3, pady=SP_2)
+        # not packed yet — _toggle_advanced() packs/unpacks it
 
-        for col, b in enumerate([self.pause_btn, self.mode_btn,
-                                  overlays_btn, reset_btn]):
-            b.grid(row=0, column=col, padx=2, pady=2, sticky="ew")
-            btn_card.columnconfigure(col, weight=1)
+        row1 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        row1.pack(fill="x")
+        self.overlays_toggle_btn = self._button(row1, "Overlays: Shown",
+                                                self._toggle_overlays, kind="ghost")
+        self.overlays_toggle_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
+        self.edit_btn = self._button(row1, "Edit Layout", self._toggle_edit_mode,
+                                     kind="ghost")
+        self.edit_btn.grid(row=0, column=1, sticky="ew")
+        row1.columnconfigure(0, weight=1)
+        row1.columnconfigure(1, weight=1)
 
-        # Row 1: Edit / Reset Default / Saves / Clear LUT
-        self.edit_btn = _btn(btn_card, "✏ Edit",   self._toggle_edit_mode,
-                             bg="#3a3a50")
-        reset_def_btn = _btn(btn_card, "⟳ Default", self._reset_to_defaults,
-                             bg="#4a2a2a", fg=C_RED)
-        saves_btn     = _btn(btn_card, "💾 Saves",   self._open_saves_modal,
-                             bg="#2a3a2a", fg=C_GREEN)
-        clear_lut_btn = _btn(btn_card, "🗑 LUT",    self.core.clear_lut,
-                             bg="#4a2a2a", fg=C_ORANGE)
+        row2 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        row2.pack(fill="x", pady=(SP_1, 0))
+        saves_btn = self._button(row2, "Saved Layouts", self._open_saves_modal,
+                                 kind="ghost")
+        saves_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
+        session_reset_btn = self._button(row2, "New Round", self._reset_counter,
+                                         kind="ghost")
+        session_reset_btn.grid(row=0, column=1, sticky="ew")
+        row2.columnconfigure(0, weight=1)
+        row2.columnconfigure(1, weight=1)
 
-        for col, b in enumerate([self.edit_btn, reset_def_btn,
-                                  saves_btn, clear_lut_btn]):
-            b.grid(row=1, column=col, padx=2, pady=2, sticky="ew")
+        row3 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        row3.pack(fill="x", pady=(SP_1, 0))
+        reset_def_btn = self._button(row3, "Reset Layout to Default",
+                                     self._reset_to_defaults, kind="danger")
+        reset_def_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
+        clear_lut_btn = self._button(row3, "Clear Saved Answers",
+                                     self.core.clear_lut, kind="danger")
+        clear_lut_btn.grid(row=0, column=1, sticky="ew")
+        row3.columnconfigure(0, weight=1)
+        row3.columnconfigure(1, weight=1)
 
-        # Row 2: Automation toggle (full width so it's obvious)
-        self.auto_btn = _btn(btn_card, "🤖 Automation: ON",
-                             self._toggle_automation,
-                             fg=C_GREEN, bg="#1e3a1e")
-        self.auto_btn.grid(row=2, column=0, columnspan=4, padx=2, pady=(4, 2), sticky="ew")
+        self.root.after_idle(self._resize_to_fit)
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI update callbacks (called from BotCore)
     # ─────────────────────────────────────────────────────────────────────────
 
     def update_cache_label(self, count):
-        self.cache_label.config(text=f"Cache: {count}")
+        self.cache_label.config(text=f"Cache {count}")
 
     def update_lut_label(self, count):
-        self.lut_label.config(text=f"LUT: {count} entries")
+        self.lut_label.config(text=f"{count} saved answers")
 
     def update_counter_label(self, answers, ready):
-        self.counter_label.config(text=f"Answers: {answers}/10  Ready: {ready}")
+        self.counter_label.config(text=f"Answers {answers}/10  ·  Ready {ready}")
 
     def set_auto_status(self, text, color="gray"):
-        self.auto_status_label.config(text=text, fg=color)
+        # Map the legacy colour-name strings used by bot_core.py onto the
+        # design-token palette so callers don't need to know hex codes.
+        color_map = {"gray": C_MUTED, "grey": C_MUTED, "orange": C_ORANGE,
+                     "green": C_GREEN, "red": C_RED}
+        self.auto_status_label.config(text=text, fg=color_map.get(color, color))
 
     def sync_pause_state(self):
         """
@@ -277,11 +419,20 @@ class OpticalReaderSolverGUI:
         so it always runs on the tkinter main thread.
         """
         if self.core.paused:
-            self.status_label.config(text="● PAUSED", fg=C_RED)
-            self.pause_btn.config(text="▶ Resume")
+            self.status_label.config(text="●  Paused", fg=C_RED)
+            self.pause_btn.config(text="▶  Resume")
         else:
-            self.status_label.config(text="● RUNNING", fg=C_GREEN)
-            self.pause_btn.config(text="⏸ Pause")
+            self.status_label.config(text="●  Running", fg=C_GREEN)
+            self.pause_btn.config(text="❚❚  Pause")
+
+    def _update_detected_display(self, expr, answer):
+        """
+        GUI-only bookkeeping: surfaces the last thing the solver saw/solved.
+        Reads state _main_loop already computes — doesn't change what gets
+        detected, solved, or clicked.
+        """
+        self.detected_label.config(text=expr if expr else "—")
+        self.result_label.config(text=str(answer) if answer is not None else "—")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Solver mode
@@ -310,7 +461,8 @@ class OpticalReaderSolverGUI:
     def _set_solver_mode(self, mode):
         self.core.solve_mode = mode
         for m, (btn, active_style) in self._mode_pills.items():
-            btn.configure(style=active_style if m == mode else "Inactive.TButton")
+            btn.configure(style=active_style if m == mode else "ModeInactive.TButton")
+        self.mode_subtitle_label.config(text=self._mode_subtitles.get(mode, ""))
         if mode == MODE_LUT_ONLY:
             self.lut_warn_label.pack(anchor="w", pady=(2, 0))
         else:
@@ -324,23 +476,33 @@ class OpticalReaderSolverGUI:
     def _toggle_pause(self):
         self.core.paused = not self.core.paused
         if self.core.paused:
-            self.status_label.config(text="● PAUSED", fg=C_RED)
-            self.pause_btn.config(text="▶ Resume")
+            self.status_label.config(text="●  Paused", fg=C_RED)
+            self.pause_btn.config(text="▶  Resume")
         else:
-            self.status_label.config(text="● RUNNING", fg=C_GREEN)
-            self.pause_btn.config(text="⏸ Pause")
+            self.status_label.config(text="●  Running", fg=C_GREEN)
+            self.pause_btn.config(text="❚❚  Pause")
             self.core._capture_target_window()
             # If user resumes while save-pending, cancel that state
             if self._edit_save_pending:
                 self._edit_save_pending = False
         print(f"[GUI] Bot {'PAUSED' if self.core.paused else 'RUNNING'}")
 
+    def _toggle_advanced(self):
+        self._advanced_visible = not self._advanced_visible
+        if self._advanced_visible:
+            self.advanced_toggle_btn.config(text="▾  Advanced", fg=C_FG)
+            self.advanced_frame.pack(fill="x", pady=(SP_1, 0))
+        else:
+            self.advanced_toggle_btn.config(text="▸  Advanced", fg=C_MUTED)
+            self.advanced_frame.pack_forget()
+        self._resize_to_fit()
+
     def _toggle_game_mode(self):
         self.core.cancel_all_scheduled_events()
         self.core.fast_mode = not self.core.fast_mode
         self.core.current_polling = (FAST_MODE_POLLING if self.core.fast_mode
                                      else STANDARD_MODE_POLLING)
-        label = "FAST · 10 ms" if self.core.fast_mode else "STANDARD · 150 ms"
+        label = "FAST" if self.core.fast_mode else "STANDARD"
         self.mode_label.config(text=label)
         # Clear ALL transient state on mode switch (LUT is untouched — it's
         # persistent and mode-independent by design)
@@ -369,6 +531,8 @@ class OpticalReaderSolverGUI:
                     w.deiconify()
             else:
                 w.withdraw()
+        self.overlays_toggle_btn.config(
+            text=f"Overlays: {'Shown' if self.overlays_visible else 'Hidden'}")
 
     def _reset_counter(self):
         self.core.cancel_all_scheduled_events()
@@ -387,15 +551,15 @@ class OpticalReaderSolverGUI:
         """
         self.core.automation_enabled = enabled
         if enabled:
-            self.auto_btn.config(text="🤖 Automation: ON",
-                                 fg=C_GREEN, bg="#1e3a1e")
+            self.auto_btn.config(text="Automation\nEnabled")
+            self._style_button(self.auto_btn, "success")
             print("[GUI] Automation ENABLED")
         else:
             # Cancel any in-progress sequences immediately
             self.core.cancel_all_scheduled_events()
             self.core.extended_sequence_active = False
-            self.auto_btn.config(text="🤖 Automation: OFF",
-                                 fg=C_MUTED, bg="#2a2a2a")
+            self.auto_btn.config(text="Automation\nOff")
+            self._style_button(self.auto_btn, "muted_off")
             if reason:
                 self.set_auto_status(reason, "red")
             else:
@@ -409,12 +573,14 @@ class OpticalReaderSolverGUI:
     def _toggle_preview(self):
         self.core.preview_enabled = not self.core.preview_enabled
         if self.core.preview_enabled:
-            self.preview_toggle_btn.config(text="ON", fg=C_GREEN)
+            self.preview_toggle_btn.config(text="On", fg=C_GREEN)
+            self._live_dot.config(fg=C_CYAN)
         else:
-            self.preview_toggle_btn.config(text="OFF", fg=C_MUTED)
+            self.preview_toggle_btn.config(text="Off", fg=C_MUTED)
+            self._live_dot.config(fg=C_MUTED_DIM)
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(143, 30, text="Preview OFF",
-                                            fill=C_MUTED, font=("Segoe UI", 9))
+            self.preview_canvas.create_text(143, 30, text="Preview off",
+                                            fill=C_MUTED, font=F_LABEL)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Saves modal (replaces the old inline slot buttons)
@@ -426,61 +592,64 @@ class OpticalReaderSolverGUI:
         save_mode=True: buttons say "Save here"; False: buttons say "Load".
         """
         modal = tk.Toplevel(self.root)
-        modal.title("Coordinate Saves")
-        modal.geometry("300x220")
+        modal.title("Saved Layouts")
+        modal.geometry("300x260")
         modal.resizable(False, False)
         modal.configure(bg=C_BG)
         modal.attributes("-topmost", True)
         modal.grab_set()   # modal behaviour
 
-        tk.Label(modal, text="Coord Slots",
-                 fg=C_FG, bg=C_BG, font=("Segoe UI", 11, "bold")).pack(pady=(12, 4))
+        tk.Label(modal, text="Saved Layouts",
+                 fg=C_FG, bg=C_BG, font=F_STATUS).pack(pady=(SP_4, SP_1))
 
-        hint = ("Click a slot to SAVE your new layout." if save_mode
-                else "Click a slot to LOAD saved coordinates.")
+        hint = ("Choose a slot to save this layout into."
+                if save_mode else
+                "Choose a saved layout to load.")
         self.modal_hint = tk.Label(modal, text=hint,
-                                   fg=C_MUTED, bg=C_BG, font=("Segoe UI", 8))
-        self.modal_hint.pack(pady=(0, 8))
+                                   fg=C_MUTED, bg=C_BG, font=F_LABEL)
+        self.modal_hint.pack(pady=(0, SP_3))
 
         slots_frame = tk.Frame(modal, bg=C_BG)
-        slots_frame.pack(fill="x", padx=12)
+        slots_frame.pack(fill="x", padx=SP_4)
 
         slots = self.core.read_slots()
         for i in range(MAX_SLOTS):
-            slot     = slots[i]
+            slot      = slots[i]
             is_active = (i == self.active_slot)
-            row_bg   = "#aaddaa" if is_active else C_SURFACE
 
-            row = tk.Frame(slots_frame, bg=row_bg, pady=4, padx=8)
-            row.pack(fill="x", pady=2)
+            row = tk.Frame(slots_frame, bg=C_SURFACE, padx=SP_2, pady=SP_2)
+            row.pack(fill="x", pady=SP_1 // 2)
 
-            label_text = (f"Slot {i+1}  —  {slot['saved']}" if slot
-                          else f"Slot {i+1}  —  (empty)")
-            tk.Label(row, text=label_text, fg=C_FG, bg=row_bg,
-                     font=("Segoe UI", 9)).pack(side="left")
+            left = tk.Frame(row, bg=C_SURFACE)
+            left.pack(side="left", fill="x", expand=True)
+            name = f"Layout {i + 1}"
+            if is_active:
+                name += "  ·  active"
+            tk.Label(left, text=name, fg=C_FG if not is_active else C_ACCENT,
+                     bg=C_SURFACE, font=F_BODY_B if is_active else F_BODY,
+                     anchor="w").pack(anchor="w")
+            sub = f"Saved {slot['saved']}" if slot else "Empty"
+            tk.Label(left, text=sub, fg=C_MUTED_DIM, bg=C_SURFACE,
+                     font=F_HELPER, anchor="w").pack(anchor="w")
 
             if save_mode:
-                btn_text = "💾 Save here"
-                btn_cmd  = lambda idx=i, m=modal: self._save_to_slot(idx, m)
-                btn_col  = C_ORANGE
+                btn_kind, btn_text = "primary", "Save here"
+                btn_cmd = lambda idx=i, m=modal: self._save_to_slot(idx, m)
             elif slot:
-                btn_text = "↩ Load"
-                btn_cmd  = lambda idx=i, m=modal: self._load_slot(idx, m)
-                btn_col  = C_CYAN
+                btn_kind, btn_text = "secondary", "Load"
+                btn_cmd = lambda idx=i, m=modal: self._load_slot(idx, m)
             else:
-                btn_text = "(empty)"
-                btn_cmd  = None
-                btn_col  = C_MUTED
+                btn_kind, btn_text = "ghost", "Empty"
+                btn_cmd = None
 
-            tk.Button(row, text=btn_text, fg=btn_col, bg=row_bg,
-                      bd=0, relief="flat", cursor="hand2",
-                      font=("Segoe UI", 8, "bold"),
-                      state="normal" if btn_cmd else "disabled",
-                      command=btn_cmd).pack(side="right")
+            slot_btn = self._button(row, btn_text, btn_cmd or (lambda: None),
+                                    kind=btn_kind, font=F_LABEL)
+            if not btn_cmd:
+                slot_btn.config(state="disabled", cursor="arrow")
+            slot_btn.pack(side="right")
 
-        tk.Button(modal, text="Close", command=modal.destroy,
-                  fg=C_MUTED, bg=C_SURFACE, relief="flat", bd=0,
-                  font=("Segoe UI", 8), cursor="hand2").pack(pady=(10, 6))
+        close_btn = self._button(modal, "Close", modal.destroy, kind="ghost")
+        close_btn.pack(pady=(SP_3, SP_3))
 
     def _save_to_slot(self, idx, modal=None):
         slots = self.core.read_slots()
@@ -510,8 +679,8 @@ class OpticalReaderSolverGUI:
             # notice until it's already clicked something wrong).
             self._clear_transient_state(f"coordinate slot {idx+1} loaded")
             self._rebuild_overlays()
-            self.status_label.config(text="● PAUSED", fg=C_RED)
-            self.pause_btn.config(text="▶ Resume")
+            self.status_label.config(text="●  Paused", fg=C_RED)
+            self.pause_btn.config(text="▶  Resume")
             print(f"[GUI] Slot {idx+1} loaded — click Resume when ready")
         if modal:
             modal.destroy()
@@ -529,7 +698,7 @@ class OpticalReaderSolverGUI:
         self.active_slot = None
         self._clear_transient_state("coordinates reset to defaults")
         self._rebuild_overlays()
-        self.status_label.config(text="● PAUSED", fg=C_RED)
+        self.status_label.config(text="●  Paused", fg=C_RED)
         print("[GUI] Reset to defaults — click Resume when ready")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -629,8 +798,10 @@ class OpticalReaderSolverGUI:
         if not self.core.paused:
             self._toggle_pause()
         self.edit_mode = True
-        self.edit_btn.config(text="✔ Done", bg=C_ORANGE, fg="black")
-        self.status_label.config(text="● EDITING", fg=C_ORANGE)
+        self._style_button(self.edit_btn, "primary")
+        self.edit_btn.config(text="✓  Done editing")
+        self.status_label.config(text="●  Editing", fg=C_ORANGE)
+        self.set_auto_status("Drag boxes to move them, corners to resize", "orange")
 
         for w in self.overlay_windows:
             w.deiconify()
@@ -659,7 +830,8 @@ class OpticalReaderSolverGUI:
 
         self.edit_mode          = False
         self._edit_save_pending = True
-        self.edit_btn.config(text="✏ Edit", bg="#3a3a50", fg=C_FG)
+        self._style_button(self.edit_btn, "ghost")
+        self.edit_btn.config(text="Edit Layout")
 
         for w in self.overlay_windows:
             cv = w.winfo_children()[0]
@@ -672,8 +844,9 @@ class OpticalReaderSolverGUI:
         elif not self.core.fast_mode:
             for w in self.auto_overlays: w.withdraw()
 
-        self.status_label.config(text="● PAUSED", fg=C_RED)
-        self.pause_btn.config(text="▶ Resume")
+        self.status_label.config(text="●  Paused", fg=C_RED)
+        self.pause_btn.config(text="▶  Resume")
+        self.set_auto_status("Layout updated — save it, or Resume to try it out", "gray")
         print("[GUI] Edit mode OFF — coords applied. Save to slot or Resume to skip.")
 
     def _cancel_edit_mode(self):
@@ -685,7 +858,8 @@ class OpticalReaderSolverGUI:
             cv.unbind("<B1-Motion>")
             self._set_click_through(w, True)
         self.edit_mode = False
-        self.edit_btn.config(text="✏ Edit", bg="#3a3a50", fg=C_FG)
+        self._style_button(self.edit_btn, "ghost")
+        self.edit_btn.config(text="Edit Layout")
 
     # ── Drag ──────────────────────────────────────────────────────────────────
 
@@ -895,6 +1069,7 @@ class OpticalReaderSolverGUI:
                     if raw != self.core.last_question:
                         self.core.last_question = raw
                         answer, source = self.core.handle_question(raw)
+                        self._update_detected_display(raw, answer)
                         if answer is not None:
                             self.core.click_answer(answer, source)
                             if self.core.automation_enabled:

@@ -1135,7 +1135,12 @@ class OpticalReaderSolverGUI:
 
                 answer, source = None, None
                 if result:
-                    raw = " ".join(t for _, t, _ in result)
+                    # Correct any '+' that the pixels actually show as a
+                    # division glyph BEFORE normalisation ever sees it —
+                    # see correct_ocr_operators()'s docstring. `arr` is
+                    # the same binarized frame already used for OCR, so
+                    # bbox coordinates line up with it directly.
+                    raw = self.core.correct_ocr_operators(result, arr)
                     if raw != self.core.last_question:
                         self.core.last_question = raw
                         answer, source = self.core.handle_question(raw)

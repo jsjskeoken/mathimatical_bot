@@ -379,6 +379,135 @@ class BotCore:
                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return thresh
 
+    # ── OCR operator disambiguation (runs BEFORE normalisation) ─────────────────
+    # EasyOCR sometimes misreads this UI's '÷' glyph (dot / bar / dot) as '+'.
+    # clean_hallucinations() below already handles a correctly-recognised '÷'
+    # (maps it to '/'), so that's not touched. This stage only exists to catch
+    # the case where OCR's TEXT is wrong before normalisation ever sees it —
+    # it inspects the actual pixels under each '+' EasyOCR reported and only
+    # corrects it to '/' when the image itself shows the dot/bar/dot shape.
+    # Deliberately NOT a second '+' → '/' text heuristic (that was already
+    # tried and reverted — see fix_missing_operator's docstring): this one
+    # only ever fires on visual evidence from the SAME bounding box OCR gave
+    # us for that character, so a genuine '+' is never touched.
+
+    def classify_plus_or_division(self, glyph_crop):
+        """
+        Given a small crop of the binarized frame covering ONE character
+        that EasyOCR read as '+', decide whether the pixels show a
+        division sign instead.
+
+        Returns '/' only when the crop's ink pixels form two compact
+        blobs (dots) stacked vertically with a gap between them — a
+        plus sign's cross is a single connected blob, so a genuine '+'
+        never has this shape. Returns None ("no strong evidence either
+        way") for anything ambiguous — callers must treat None exactly
+        like '+' (no correction) rather than guessing, since a wrong
+        guess here would recreate the old unsafe blanket '+' → '/' bug
+        on a per-character, harder-to-notice basis instead.
+        """
+        if glyph_crop is None or glyph_crop.size == 0:
+            return None
+        vals, counts = np.unique(glyph_crop, return_counts=True)
+        if len(vals) < 2:
+            return None  # blank crop — no glyph pixels to judge
+        # The crop is mostly background by area, so the minority pixel
+        # value is the ink — this works regardless of which way Otsu's
+        # threshold happened to polarize this particular frame.
+        ink_value = vals[np.argmin(counts)]
+        ink_mask = np.uint8(glyph_crop == ink_value) * 255
+
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            ink_mask, connectivity=8)
+        h_crop, w_crop = glyph_crop.shape
+        min_area = max(2, int(0.003 * h_crop * w_crop))
+        components = []
+        for i in range(1, n_labels):
+            x, y, w, ht, area = stats[i]
+            if area < min_area:
+                continue
+            if ht > 0.55 * h_crop:
+                continue  # too tall to be a division dot/bar — likely a
+                          # bled-in neighbouring digit, not this glyph
+            if x <= 0 or x + w >= w_crop:
+                continue  # touches the crop edge — likely bleed from an
+                          # adjacent character rather than this glyph
+            components.append(stats[i])
+
+        if len(components) <= 1:
+            return '+'   # single connected blob = a cross, not dot/bar/dot
+        if len(components) > 4:
+            return None  # too noisy / crop likely caught neighbouring chars
+
+        h = glyph_crop.shape[0]
+        centroid_ys = sorted(c[1] + c[3] / 2 for c in components)
+        top_third, bottom_third = h / 3, 2 * h / 3
+        has_top    = any(y < top_third for y in centroid_ys)
+        has_bottom = any(y > bottom_third for y in centroid_ys)
+        return '/' if (has_top and has_bottom) else None
+
+    def _extract_glyph_crop(self, image, bbox, char_index, char_count):
+        """
+        Crop roughly one character's column range out of an EasyOCR
+        token's full bounding box (4 corner points), using an equal-width
+        monospace approximation across the token's character count.
+
+        Doesn't need to be pixel-perfect — classify_plus_or_division()
+        only looks at vertical blob layout, so a little slack on either
+        side of the true glyph edge doesn't change the verdict, and
+        genuinely ambiguous/over-wide crops already fall back to None.
+        """
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        x1, x2 = int(min(xs)), int(max(xs))
+        y1, y2 = int(min(ys)), int(max(ys))
+        char_count = max(char_count, 1)
+        char_w = (x2 - x1) / char_count
+        pad = char_w * 0.35
+        cx1 = int(max(x1, x1 + char_index * char_w - pad))
+        cx2 = int(min(x2, x1 + (char_index + 1) * char_w + pad))
+        cy1, cy2 = max(0, y1), min(image.shape[0], y2)
+        if cx2 <= cx1 or cy2 <= cy1:
+            return None
+        return image[cy1:cy2, cx1:cx2]
+
+    def correct_ocr_operators(self, ocr_results, full_image):
+        """
+        Runs on the raw EasyOCR output (list of (bbox, text, confidence)),
+        BEFORE any of normalise()'s text pipeline. For every '+' character
+        reported, inspects the pixels under it and corrects to '/' only on
+        strong visual evidence (see classify_plus_or_division). Everything
+        else — '-', '*', a correctly-read '÷', digits — passes through
+        untouched.
+
+        Returns one joined string in the same order/spacing EasyOCR
+        results were previously joined in, so this is a drop-in
+        replacement for `" ".join(t for _, t, _ in result)` — normalise(),
+        solve_math, the LUT and both caches all still see exactly one
+        canonical string and are otherwise completely unchanged.
+        """
+        tokens = []
+        for bbox, text, conf in ocr_results:
+            if '+' not in text:
+                tokens.append(text)
+                continue
+            chars = list(text)
+            for i, ch in enumerate(chars):
+                if ch != '+':
+                    continue
+                crop = self._extract_glyph_crop(full_image, bbox, i, len(chars))
+                verdict = self.classify_plus_or_division(crop)
+                if verdict == '/':
+                    print("[CORE] OCR operator: '+'  visual classification: "
+                          "division-like  corrected operator: '/'")
+                    chars[i] = '/'
+                else:
+                    label = "plus-like" if verdict == '+' else "inconclusive"
+                    print(f"[CORE] OCR operator: '+'  visual classification: "
+                          f"{label}  corrected operator: '+'")
+            tokens.append("".join(chars))
+        return " ".join(tokens)
+
     # ── Normalisation ─────────────────────────────────────────────────────────
 
     def clean_hallucinations(self, expr):

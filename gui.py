@@ -1145,6 +1145,25 @@ class OpticalReaderSolverGUI:
                         self.core.last_question = raw
                         answer, source = self.core.handle_question(raw)
                         self._update_detected_display(raw, answer)
+                        # Reschedule the 50ms reset regardless of whether this
+                        # reading solved — previously this only ran inside
+                        # "if answer is not None", so a reading that FAILED to
+                        # solve (garbled OCR, unparseable expression) latched
+                        # last_question permanently with no reset ever
+                        # scheduled. If that exact bad text reappeared (a
+                        # static UI plus minor rendering jitter can change the
+                        # frame hash without changing what OCR reads), it was
+                        # silently skipped forever instead of retried — the
+                        # same "stuck failure" class of bug already fixed for
+                        # frame_answer_cache, just in this separate debounce.
+                        if self.core._last_question_reset_id is not None:
+                            try:
+                                self.root.after_cancel(
+                                    self.core._last_question_reset_id)
+                            except Exception:
+                                pass
+                        self.core._last_question_reset_id = self.root.after(
+                            50, self._reset_last_question)
                         if answer is not None:
                             click_result = self.core.click_answer(answer, source)
                             # Same rule as the frame-cache path above: only a
@@ -1152,14 +1171,6 @@ class OpticalReaderSolverGUI:
                             if click_result == CLICK_RESULT_CLICKED:
                                 self._pending_confirm_hash     = current_hash
                                 self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
-                            if self.core._last_question_reset_id is not None:
-                                try:
-                                    self.root.after_cancel(
-                                        self.core._last_question_reset_id)
-                                except Exception:
-                                    pass
-                            self.core._last_question_reset_id = self.root.after(
-                                50, self._reset_last_question)
 
                 # Cache successful results only. A failed OCR/solve attempt
                 # used to be cached as (None, None) too — meant to save a

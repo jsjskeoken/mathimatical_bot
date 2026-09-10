@@ -43,15 +43,33 @@ if errorlevel 1 (
     echo Some dependencies are missing - installing now.
     echo This can take several minutes the first time ^(EasyOCR pulls in torch^).
     echo.
-    %PYEXE% -m pip install --upgrade pip
-    %PYEXE% -m pip install easyocr opencv-python numpy sympy pyautogui mss pillow pynput
+
+    REM Upgrading pip itself is a nice-to-have, not a requirement - on a
+    REM locked-down account this step can fail on its own for the same
+    REM permissions reason as the real install below, so don't treat a
+    REM failure here as fatal; just try and move on.
+    %PYEXE% -m pip install --upgrade pip >nul 2>&1
+
+    %PYEXE% -m pip install easyocr opencv-python numpy sympy pyautogui mss pillow pynput certifi
     if errorlevel 1 (
         echo.
-        echo Dependency installation failed - check the error above and your
-        echo internet connection, then re-run this script.
+        echo System-wide install failed. This is almost always a permissions
+        echo issue, not a real error - it usually means this Windows account
+        echo doesn't have write access to Python's shared install folder,
+        echo which is common on school/lab computers without admin rights.
+        echo Retrying with --user, which installs into your OWN profile
+        echo instead and never needs admin access...
         echo.
-        pause
-        exit /b 1
+        %PYEXE% -m pip install --user easyocr opencv-python numpy sympy pyautogui mss pillow pynput certifi
+        if errorlevel 1 (
+            echo.
+            echo Dependency installation failed even with --user - check the
+            echo error above and your internet connection, then re-run this
+            echo script.
+            echo.
+            pause
+            exit /b 1
+        )
     )
     echo.
     echo Dependencies installed successfully.

@@ -23,6 +23,21 @@ import ctypes.wintypes  # must be imported explicitly — accessing
 import threading
 from pynput import keyboard as pynput_keyboard
 
+# EasyOCR's first run downloads its recognition model over HTTPS. On some
+# machines (notably locked-down school/lab accounts, and some corporate
+# networks) Python's bundled certificate store is missing or stale, which
+# makes that download fail with an SSL verification error that looks
+# nothing like a certificate problem from the traceback alone. `certifi`
+# ships an up-to-date CA bundle; point the relevant env vars at it when
+# it's available, and do nothing if it isn't — this must never be a hard
+# dependency, since the app works fine without it on most machines.
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+except ImportError:
+    pass
+
 # ── Safety ──────────────────────────────────────────────────────────────────
 # Disable pyautogui fail-safe — without this, moving the mouse to (0,0)
 # raises FailSafeException which kills the process instantly.
@@ -75,12 +90,59 @@ def s_bbox(bbox):
 
 def fast_click(x, y):
     """
-    Bypass PyAutoGUI entirely for zero-latency hardware-level clicks.
-    Uses Windows API directly: SetCursorPos + mouse_event (down then up).
-    No Python overhead, no metric recalculation — the OS receives the input
-    in the same instruction cycle.
+    Move to a screen coordinate and issue one left click, Windows-native.
+
+    SetCursorPos's return value used to be ignored entirely, which meant a
+    silently-failed cursor move (e.g. an elevated target window blocking
+    input from this non-elevated process via UIPI — see the admin-elevation
+    check above) was indistinguishable from a real click: nothing raised,
+    nothing logged, the console just said "Clicking: 42" and moved on. That
+    made coordinate, elevation, and input-blocking problems look exactly
+    like OCR failures from the outside.
+
+    Now: verify with GetCursorPos that the cursor actually reached (x, y).
+    If not, fall back once to pyautogui.moveTo (a different, slower input
+    path that sometimes succeeds where the raw Win32 call didn't) and
+    re-verify. If it STILL didn't land, raise rather than click blind —
+    a caller that doesn't want an exception mid-sequence should catch this,
+    but it must never be silently swallowed here, since that's exactly the
+    bug being fixed.
+
+    mouse_event itself returns void on Win32 — there is nothing meaningful
+    to check on its return value, so this deliberately does NOT add a
+    check there; the verification above (did the cursor actually move) is
+    the real success signal for the click that follows.
     """
-    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+    x, y = int(x), int(y)
+    # CURR_W/CURR_H are the primary-monitor resolution pyautogui reported at
+    # startup (see module top) — the same single-monitor assumption already
+    # baked into REF_W/REF_H and the SCALE_X/SCALE_Y coordinate scaling.
+    # This check doesn't add a new limitation, it just surfaces that
+    # existing one explicitly instead of letting a stale/wrong coordinate
+    # silently move the cursor somewhere nonsensical. If multi-monitor
+    # support (incl. negative virtual-desktop coordinates) is ever added,
+    # it needs to happen in the scaling model too, not just here.
+    if not (0 <= x < CURR_W and 0 <= y < CURR_H):
+        raise ValueError(
+            f"click coordinate ({x}, {y}) is outside the detected screen "
+            f"({CURR_W}x{CURR_H}) — check optical_coords.json against the "
+            f"current resolution/scaling")
+
+    user32 = ctypes.windll.user32
+    user32.SetCursorPos(x, y)
+    point = ctypes.wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(point))
+    if (point.x, point.y) != (x, y):
+        print(f"[CORE] Win32 cursor move missed target: requested=({x}, {y}) "
+              f"actual=({point.x}, {point.y}) — retrying via pyautogui")
+        pyautogui.moveTo(x, y, duration=0)
+        fallback = tuple(int(v) for v in pyautogui.position())
+        if fallback != (x, y):
+            raise RuntimeError(
+                f"cursor could not be placed at ({x}, {y}) by either Win32 "
+                f"or pyautogui — actual position after both attempts: "
+                f"{fallback}. Not clicking blind.")
+
     ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
     ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
 
@@ -151,8 +213,12 @@ AUTO_AREA_3        = apply_scaling_and_offset_xy(*ORIGINAL_AUTO_AREA_3)
 # ── Polling / timing constants ───────────────────────────────────────────────
 FAST_MODE_POLLING     = 10    # ms
 STANDARD_MODE_POLLING    = 150   # ms
-KEY_PRESS_DELAY       = 0     # s between digit clicks
-POST_ANSWER_DELAY     = 0     # s after OK click
+KEY_PRESS_DELAY       = 0.025 # s between digit clicks — some target UIs
+                               # can't process back-to-back zero-delay
+                               # input events reliably; tune if profiling
+                               # on the real target shows this is more
+                               # than needed (see fast_click's docstring)
+POST_ANSWER_DELAY     = 0.025 # s after OK click, same reasoning
 TASKBAR_CHECK_INTERVAL = 2000 # ms
 PREVIEW_UPDATE_INTERVAL = 5   # loop iterations between preview refreshes
 
@@ -225,13 +291,38 @@ class BotCore:
         self.solve_mode               = MODE_HYBRID
         self.preview_enabled          = True
         self.preview_loop_counter     = 0
+        # Which operators the current question set can actually contain —
+        # used by select_math_ocr_text() to reject candidate expressions
+        # using a disabled operator. This FILTERS candidates; it must never
+        # be used to manufacture a different operator (e.g. turning a
+        # disabled '+' into '/') — that's exactly the unsafe blanket
+        # heuristic this project already removed once. See
+        # select_math_ocr_text()'s docstring.
+        self.enabled_operations       = {'+', '-', '*', '/'}
 
         # Automation
         self.answers_count            = 0
         self.ready_count              = 0
         self.is_answering             = False
         self.extended_sequence_active = False
-        self.automation_enabled       = True   # toggled by the Automation button
+        # Two deliberately separate flags, not one:
+        #   answer_clicks_enabled — may the solver submit a solved answer
+        #     on the keypad at all? The confirmation-failure safety net
+        #     (see gui.py's _main_loop) disables THIS one specifically.
+        #   auto_sequence_enabled — may the optional delayed AUTO 1/2/3
+        #     sequence run? Independent of whether answers are being
+        #     submitted normally.
+        # A single combined flag previously meant there was no way to stop
+        # the extra AUTO 1/2/3 behaviour without also stopping normal
+        # answer submission, and — the more important direction — no way
+        # for an automated safety response to stop answer submission
+        # without also (as a side effect worth naming, not a bug) stopping
+        # the bonus sequence. Keeping them separate makes each control do
+        # exactly what it says and nothing else.
+        self.answer_clicks_enabled    = True   # toggled by the Automation button;
+                                                # also disabled by the confirmation
+                                                # safety net in gui.py
+        self.auto_sequence_enabled    = True   # independent; AUTO 1/2/3 only
         self.scheduled_events         = []
 
         # ── answer_cache — "ANSWERED THIS ROUND" cache ──────────────────────
@@ -391,60 +482,74 @@ class BotCore:
     # only ever fires on visual evidence from the SAME bounding box OCR gave
     # us for that character, so a genuine '+' is never touched.
 
-    def classify_plus_or_division(self, glyph_crop):
+    def is_division_glyph(self, glyph_crop):
         """
-        Given a small crop of the binarized frame covering ONE character
-        that EasyOCR read as '+', decide whether the pixels show a
-        division sign instead.
+        Given a small crop of ONE character EasyOCR reported as '+',
+        decide whether the pixels actually show a division sign
+        (dot / bar / dot) instead.
 
-        Returns '/' only when the crop's ink pixels form two compact
-        blobs (dots) stacked vertically with a gap between them — a
-        plus sign's cross is a single connected blob, so a genuine '+'
-        never has this shape. Returns None ("no strong evidence either
-        way") for anything ambiguous — callers must treat None exactly
-        like '+' (no correction) rather than guessing, since a wrong
-        guess here would recreate the old unsafe blanket '+' → '/' bug
-        on a per-character, harder-to-notice basis instead.
+        Tries BOTH Otsu threshold polarities (light-on-dark and
+        dark-on-light) rather than assuming which one this particular
+        frame will produce — Otsu's polarity choice isn't guaranteed
+        consistent frame to frame. Requires a compact blob in the top
+        third AND a compact blob in the bottom third — a genuine plus
+        sign's cross is always one single connected blob, so it can
+        never satisfy this regardless of polarity. When a middle-band
+        blob is also present, it only counts as a division bar (extra
+        confirmation) if it's visibly wider than the top/bottom dots —
+        a stray noise speck sitting in the middle band doesn't get to
+        masquerade as a bar just by being there.
+
+        Returns False on anything ambiguous, same rule as before:
+        false negatives just leave the '+' unchanged; false positives
+        corrupt a correct answer, so precision matters more than
+        recall here. Never returns a guess.
         """
         if glyph_crop is None or glyph_crop.size == 0:
-            return None
-        vals, counts = np.unique(glyph_crop, return_counts=True)
-        if len(vals) < 2:
-            return None  # blank crop — no glyph pixels to judge
-        # The crop is mostly background by area, so the minority pixel
-        # value is the ink — this works regardless of which way Otsu's
-        # threshold happened to polarize this particular frame.
-        ink_value = vals[np.argmin(counts)]
-        ink_mask = np.uint8(glyph_crop == ink_value) * 255
-
-        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
-            ink_mask, connectivity=8)
-        h_crop, w_crop = glyph_crop.shape
+            return False
+        gray = glyph_crop if glyph_crop.ndim == 2 else cv2.cvtColor(
+            glyph_crop, cv2.COLOR_BGR2GRAY)
+        h_crop, w_crop = gray.shape[:2]
         min_area = max(2, int(0.003 * h_crop * w_crop))
-        components = []
-        for i in range(1, n_labels):
-            x, y, w, ht, area = stats[i]
-            if area < min_area:
-                continue
-            if ht > 0.55 * h_crop:
-                continue  # too tall to be a division dot/bar — likely a
-                          # bled-in neighbouring digit, not this glyph
-            if x <= 0 or x + w >= w_crop:
-                continue  # touches the crop edge — likely bleed from an
-                          # adjacent character rather than this glyph
-            components.append(stats[i])
 
-        if len(components) <= 1:
-            return '+'   # single connected blob = a cross, not dot/bar/dot
-        if len(components) > 4:
-            return None  # too noisy / crop likely caught neighbouring chars
+        for threshold_type in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+            _, mask = cv2.threshold(gray, 0, 255,
+                                     threshold_type + cv2.THRESH_OTSU)
+            n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+                mask, connectivity=8)
+            components = []
+            for i in range(1, n_labels):
+                x, y, w, ht, area = stats[i]
+                if area < min_area or ht > 0.55 * h_crop:
+                    continue  # too tall to be a dot/bar — likely a
+                              # bled-in neighbouring digit
+                if x <= 0 or x + w >= w_crop:
+                    continue  # touches the crop edge — likely bleed
+                              # from an adjacent character
+                components.append((x, y, w, ht, area))
+            if not (2 <= len(components) <= 4):
+                continue  # wrong polarity for this frame, or noise —
+                          # try the other polarity before giving up
 
-        h = glyph_crop.shape[0]
-        centroid_ys = sorted(c[1] + c[3] / 2 for c in components)
-        top_third, bottom_third = h / 3, 2 * h / 3
-        has_top    = any(y < top_third for y in centroid_ys)
-        has_bottom = any(y > bottom_third for y in centroid_ys)
-        return '/' if (has_top and has_bottom) else None
+            components.sort(key=lambda c: c[1] + c[3] / 2)
+            centers = [y + ht / 2 for _, y, _, ht, _ in components]
+            top_third, bottom_third = h_crop / 3, 2 * h_crop / 3
+            top    = [c for c, cy in zip(components, centers) if cy < top_third]
+            bottom = [c for c, cy in zip(components, centers) if cy > bottom_third]
+            if not top or not bottom:
+                continue  # must have a blob in BOTH bands, not just
+                          # "some blobs somewhere" in the crop
+
+            middle = [c for c, cy in zip(components, centers)
+                      if top_third <= cy <= bottom_third]
+            if middle:
+                middle_width = max(c[2] for c in middle)
+                dot_width    = max(c[2] for c in top + bottom)
+                if middle_width < dot_width * 1.2:
+                    continue  # "middle" blob isn't meaningfully wider
+                              # than the dots — probably noise, not a bar
+            return True
+        return False
 
     def _extract_glyph_crop(self, image, bbox, char_index, char_count):
         """
@@ -452,7 +557,7 @@ class BotCore:
         token's full bounding box (4 corner points), using an equal-width
         monospace approximation across the token's character count.
 
-        Doesn't need to be pixel-perfect — classify_plus_or_division()
+        Doesn't need to be pixel-perfect — is_division_glyph()
         only looks at vertical blob layout, so a little slack on either
         side of the true glyph edge doesn't change the verdict, and
         genuinely ambiguous/over-wide crops already fall back to None.
@@ -476,7 +581,7 @@ class BotCore:
         Runs on the raw EasyOCR output (list of (bbox, text, confidence)),
         BEFORE any of normalise()'s text pipeline. For every '+' character
         reported, inspects the pixels under it and corrects to '/' only on
-        strong visual evidence (see classify_plus_or_division). Everything
+        strong visual evidence (see is_division_glyph). Everything
         else — '-', '*', a correctly-read '÷', digits — passes through
         untouched.
 
@@ -496,17 +601,98 @@ class BotCore:
                 if ch != '+':
                     continue
                 crop = self._extract_glyph_crop(full_image, bbox, i, len(chars))
-                verdict = self.classify_plus_or_division(crop)
-                if verdict == '/':
+                if self.is_division_glyph(crop):
                     print("[CORE] OCR operator: '+'  visual classification: "
                           "division-like  corrected operator: '/'")
                     chars[i] = '/'
                 else:
-                    label = "plus-like" if verdict == '+' else "inconclusive"
-                    print(f"[CORE] OCR operator: '+'  visual classification: "
-                          f"{label}  corrected operator: '+'")
+                    print("[CORE] OCR operator: '+'  visual classification: "
+                          "not division  corrected operator: '+'")
             tokens.append("".join(chars))
         return " ".join(tokens)
+
+    _DATE_SHAPE_RE = re.compile(r"^\s*\d{1,4}\s*/\s*\d{1,2}\s*/\s*\d{1,4}\s*$")
+
+    def select_math_ocr_text(self, ocr_results, full_image):
+        """
+        Pick the most plausible math expression out of EasyOCR's raw token
+        list for the whole captured region, instead of naively joining
+        every token — useful when the capture box catches a stray date,
+        label, or fragment alongside the actual question.
+
+        Each token is first run through correct_ocr_operators() individually
+        (the same safe, visual-evidence-only '+'→'/' correction used
+        elsewhere — nothing new or different happens to operators here).
+        Candidates are then built from small contiguous windows of those
+        corrected tokens (1–4 tokens), and a candidate is only accepted if
+        it: isn't date-shaped (`\\d/\\d/\\d`), uses only operators in
+        enabled_operations, contains both a digit and an operator,
+        normalises to something non-empty with a sane digit-group count,
+        and actually solves.
+
+        enabled_operations is used ONLY to FILTER candidates (skip one that
+        uses a disabled operator) — it never converts one operator into
+        another. That distinction matters: an earlier version of this idea
+        used "'+' disabled and '/' enabled" as a trigger to blanket-convert
+        every '+' to '/', which is just the old unsafe global '+'→'/'
+        heuristic wearing a different hat. The ONLY thing that can turn a
+        '+' into '/' anywhere in this codebase is is_division_glyph()
+        finding actual dot/bar/dot pixel evidence, in correct_ocr_operators
+        above — this function never second-guesses that.
+
+        Among the candidates that survive filtering and actually solve,
+        prefers the one spanning the FEWEST tokens (then the earliest
+        start) — not the longest. A longer solvable candidate is more
+        likely to have accidentally stitched the real question together
+        with an adjacent noise token than a shorter one is to have missed
+        real content, since an incomplete expression (e.g. a trailing
+        operator with no right-hand operand) fails to solve and is filtered
+        out before scoring ever sees it.
+
+        Returns "" when nothing credible is found — callers should treat
+        that the same as "OCR found nothing usable this frame".
+        """
+        tokens = [self.correct_ocr_operators([item], full_image).strip()
+                  for item in ocr_results]
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return ""
+
+        best, best_score = None, None
+        for start in range(len(tokens)):
+            for end in range(start + 1, min(len(tokens), start + 4) + 1):
+                candidate = " ".join(tokens[start:end])
+                span = end - start
+
+                if self._DATE_SHAPE_RE.match(candidate):
+                    continue
+                candidate_operators = set(re.findall(r'[+\-*/]', candidate))
+                if any(op not in self.enabled_operations for op in candidate_operators):
+                    continue
+                if not candidate_operators or not re.search(r"\d", candidate):
+                    continue
+
+                norm = self.normalise(candidate)
+                if self.fast_mode:
+                    norm = re.sub(r'[=?]', '', norm).strip()
+                digit_groups = re.findall(r"\d+", norm)
+                # A leading unary +/- (e.g. "+6" left over from a window
+                # that started mid-expression, like the tail end of "7 + 6")
+                # is valid syntax and would "solve" via eval()/sympy to a
+                # single number — that's a malformed fragment, not a real
+                # two-operand expression, and it must never out-compete the
+                # real expression just for being the shorter span.
+                if not norm or len(digit_groups) < 2 or len(digit_groups) > 3:
+                    continue
+                if self.solve_algebra(norm) is None:
+                    continue
+
+                score = (-span, -start)  # fewer tokens wins; earlier start
+                                          # breaks ties (negated: higher is better)
+                if best_score is None or score > best_score:
+                    best, best_score = candidate, score
+
+        return best if best is not None else ""
 
     # ── Normalisation ─────────────────────────────────────────────────────────
 
@@ -791,9 +977,16 @@ class BotCore:
 
             # ── Global safety switch ───────────────────────────────────────────
             # This is the ONLY place that actually issues clicks for an answer,
-            # so it's the one place that must respect automation_enabled.
-            if not self.automation_enabled:
-                print(f"[CORE] [{source.upper()}] Automation OFF — not clicking {answer_str}")
+            # so it's the one place that must respect answer_clicks_enabled.
+            # Deliberately a SEPARATE flag from auto_sequence_enabled (which
+            # only gates the optional AUTO 1/2/3 sequence below) — the
+            # confirmation-failure safety net further down disables THIS
+            # flag specifically, because disabling only the auto-sequence
+            # while leaving answer-submission clicking untouched would mean
+            # the safety net can trip on repeated unconfirmed clicks without
+            # actually stopping the clicking that's failing to land.
+            if not self.answer_clicks_enabled:
+                print(f"[CORE] [{source.upper()}] Answer clicking OFF — not clicking {answer_str}")
                 result = CLICK_RESULT_AUTOMATION_OFF
             else:
                 # Guard against clicking into the wrong window — e.g. the
@@ -850,8 +1043,8 @@ class BotCore:
 
             # ── Automation counter ────────────────────────────────────────────
             # Only counts an actual click — previously gated on
-            # automation_enabled alone, which meant a wrong-window or
-            # unmapped-answer skip (automation still nominally "on") would
+            # answer_clicks_enabled alone, which meant a wrong-window or
+            # unmapped-answer skip (answer clicks still nominally "on") would
             # still advance the counter toward triggering the auto-sequence,
             # even though nothing was actually clicked that round.
             if result == CLICK_RESULT_CLICKED and self.fast_mode and not self.extended_sequence_active:
@@ -895,8 +1088,8 @@ class BotCore:
     # ── Auto-click sequence ───────────────────────────────────────────────────
 
     def _can_auto(self, area_name):
-        if not self.automation_enabled:
-            print(f"[CORE] Skip {area_name}: automation disabled")
+        if not self.auto_sequence_enabled:
+            print(f"[CORE] Skip {area_name}: auto sequence disabled")
             return False
         if self.is_answering or self.paused or not self.fast_mode:
             reason = ("answering" if self.is_answering else

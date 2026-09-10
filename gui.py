@@ -11,6 +11,8 @@ import hashlib
 import numpy as np
 import ctypes
 import datetime
+import os
+import re
 import time
 
 from bot_core import (
@@ -29,6 +31,10 @@ import bot_core  # for the mutable globals QUESTION_AREA etc.
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_LAYERED     = 0x00080000
 GWL_EXSTYLE       = -20
+# Off by default (see the "Save OCR captures" advanced toggle) — only
+# created on disk the first time a capture is actually saved.
+OCR_CAPTURE_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "ocr_captures")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Design tokens — the single source of truth for every colour/font/spacing
@@ -421,6 +427,53 @@ class OpticalReaderSolverGUI:
         row3.columnconfigure(0, weight=1)
         row3.columnconfigure(1, weight=1)
 
+        # ── Known operations — FILTERS which operators a candidate
+        # expression may use (select_math_ocr_text rejects any candidate
+        # containing a disabled operator); it never converts one operator
+        # into another. Disabling '+' does NOT make a '+' become '/' —
+        # only is_division_glyph's pixel evidence can do that, in
+        # correct_ocr_operators. See select_math_ocr_text's docstring. ──
+        operations_label = tk.Label(self.advanced_frame, text="Known operations",
+                                    fg=C_MUTED, bg=C_SURFACE_ALT, font=F_LABEL)
+        operations_label.pack(anchor="w", pady=(SP_2, SP_1))
+        operations_row = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        operations_row.pack(fill="x")
+        operation_defs = [
+            ("+", "Addition"), ("-", "Subtraction"),
+            ("*", "Multiply"), ("/", "Division"),
+        ]
+        self.operation_vars = {}
+        for column, (operator, label) in enumerate(operation_defs):
+            var = tk.BooleanVar(value=True)
+            self.operation_vars[operator] = var
+            check = tk.Checkbutton(
+                operations_row, text=label, variable=var,
+                command=lambda op=operator: self._operation_changed(op),
+                fg=C_FG, bg=C_SURFACE_ALT,
+                activeforeground=C_FG, activebackground=C_SURFACE_ALT,
+                selectcolor=C_SURFACE, highlightthickness=0,
+                bd=0, padx=SP_1, pady=SP_1, font=F_LABEL,
+            )
+            check.grid(row=0, column=column, sticky="w")
+            operations_row.columnconfigure(column, weight=1)
+
+        # ── OCR capture debug logging — off by default. Each solved
+        # question writes two PNGs (original + processed) to
+        # ocr_captures/, which is useful for diagnosing misreads but grows
+        # without bound if left on for a long run, so this is opt-in rather
+        # than always-on. ──────────────────────────────────────────────────
+        self.save_ocr_captures_var = tk.BooleanVar(value=False)
+        capture_check = tk.Checkbutton(
+            self.advanced_frame, text="Save OCR captures (debug)",
+            variable=self.save_ocr_captures_var,
+            command=self._toggle_ocr_captures,
+            fg=C_FG, bg=C_SURFACE_ALT,
+            activeforeground=C_FG, activebackground=C_SURFACE_ALT,
+            selectcolor=C_SURFACE, highlightthickness=0,
+            bd=0, padx=SP_1, pady=SP_1, font=F_LABEL,
+        )
+        capture_check.pack(anchor="w", pady=(SP_2, 0))
+
         self.root.after_idle(self._resize_to_fit)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -479,6 +532,65 @@ class OpticalReaderSolverGUI:
         """
         self.detected_label.config(text=expr if expr else "—")
         self.result_label.config(text=str(answer) if answer is not None else "—")
+
+    def _toggle_ocr_captures(self):
+        enabled = self.save_ocr_captures_var.get()
+        print(f"[GUI] OCR capture saving {'ENABLED' if enabled else 'disabled'}"
+              + (f" → {OCR_CAPTURE_DIR}" if enabled else ""))
+
+    def _save_ocr_capture(self, sct_img, processed, raw_text, answer, source):
+        """
+        Save the original screen crop and the exact image passed to
+        EasyOCR, for diagnosing OCR mistakes later (e.g. "what did the
+        classifier actually see when it called this division-like").
+
+        Off by default — gated on the "Save OCR captures" advanced toggle,
+        checked here rather than at each call site, so callers don't need
+        to know about the setting. Only called for a question that
+        actually reached a solved answer (answer is not None); a run that
+        never solves anything creates no directory and no files, so
+        leaving this on for a long unattended session still can't run
+        away with disk space the way logging every raw OCR attempt would.
+        """
+        if not self.save_ocr_captures_var.get() or answer is None:
+            return
+        try:
+            os.makedirs(OCR_CAPTURE_DIR, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            safe_text = raw_text
+            for operator, name in {
+                "+": "_add_", "-": "_sub_", "*": "_mul_",
+                "/": "_div_", "=": "_eq_", ":": "_div_",
+            }.items():
+                safe_text = safe_text.replace(operator, name)
+            safe_text = re.sub(r"[^A-Za-z0-9_]+", "_", safe_text).strip("_")
+            safe_text = (safe_text[:60] or "unknown")
+            prefix = f"{stamp}_{safe_text}_answer-{answer}_{source}"
+
+            original = Image.frombytes(
+                "RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+            original.save(os.path.join(OCR_CAPTURE_DIR, prefix + "_original.png"))
+            Image.fromarray(processed).save(
+                os.path.join(OCR_CAPTURE_DIR, prefix + "_processed.png"))
+            print(f"[GUI] OCR capture saved: {prefix}")
+        except Exception as exc:
+            print(f"[GUI] OCR capture save failed: {exc}")
+
+    def _operation_changed(self, operator):
+        """
+        Updates core.enabled_operations from the checkbox state. This is a
+        FILTER only — select_math_ocr_text() rejects a candidate expression
+        that uses a disabled operator; it never converts one operator into
+        another. Disabling '+' does not make a stray '+' become '/' — only
+        is_division_glyph's pixel evidence can do that, in
+        correct_ocr_operators(), completely independently of this setting.
+        """
+        enabled = {op for op, var in self.operation_vars.items() if var.get()}
+        self.core.enabled_operations = enabled
+        self._clear_transient_state("operation filters changed")
+        names = {"+": "addition", "-": "subtraction", "*": "multiplication", "/": "division"}
+        state = "enabled" if operator in enabled else "disabled"
+        print(f"[GUI] Operation {names[operator]} {state}; active={sorted(enabled)}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Solver mode
@@ -598,8 +710,21 @@ class OpticalReaderSolverGUI:
         Single place that flips automation on/off and updates the button —
         used by the manual toggle AND by the auto-pause-on-unconfirmed-clicks
         safety net, so both stay visually consistent.
+
+        Internally this now sets TWO separate core flags, not one:
+        answer_clicks_enabled (whether a solved answer may be submitted on
+        the keypad — the safety-critical one, and the one the confirmation
+        safety net below is actually reacting to when clicks aren't
+        landing) and auto_sequence_enabled (the optional AUTO 1/2/3
+        sequence). They're kept in lockstep here because this single
+        "Automation" button is still meant to be a top-level kill-switch
+        for all automated clicking, same as before — but click_answer()
+        and _can_auto() in bot_core.py check them independently now, so
+        the safety net trips the flag that actually matters (answer
+        submission) rather than only the bonus sequence around it.
         """
-        self.core.automation_enabled = enabled
+        self.core.answer_clicks_enabled = enabled
+        self.core.auto_sequence_enabled = enabled
         if enabled:
             self.auto_btn.config(text="Automation\nEnabled")
             self._style_button(self.auto_btn, "success")
@@ -630,7 +755,7 @@ class OpticalReaderSolverGUI:
                   + (f" ({reason})" if reason else ""))
 
     def _toggle_automation(self):
-        self._set_automation_enabled(not self.core.automation_enabled)
+        self._set_automation_enabled(not self.core.answer_clicks_enabled)
 
     def _toggle_preview(self):
         self.core.preview_enabled = not self.core.preview_enabled
@@ -1102,13 +1227,19 @@ class OpticalReaderSolverGUI:
                     cached_answer, cached_source = self.frame_answer_cache[current_hash]
                     if cached_answer is not None and self.core.last_question == "":
                         print(f"[GUI] [FRAME CACHE] {cached_answer}")
+                        if self.save_ocr_captures_var.get():
+                            cached_processed = self.core.preprocess_for_ocr(
+                                np.array(sct_img))
+                            self._save_ocr_capture(
+                                sct_img, cached_processed, "frame-cache",
+                                cached_answer, cached_source)
                         click_result = self.core.click_answer(cached_answer, cached_source)
                         # Only arm confirmation for a VERIFIED click — click_answer()
-                        # can return "known but not submitted" (automation off,
-                        # wrong window focused, unmapped answer) just as easily as
-                        # "clicked", and checking automation_enabled alone here
-                        # would arm a confirmation timer for a click that never
-                        # actually happened.
+                        # can return "known but not submitted" (answer clicks
+                        # off, wrong window focused, unmapped answer) just as
+                        # easily as "clicked", and checking answer_clicks_enabled
+                        # alone here would arm a confirmation timer for a click
+                        # that never actually happened.
                         if click_result == CLICK_RESULT_CLICKED:
                             self._pending_confirm_hash     = current_hash
                             self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
@@ -1135,16 +1266,21 @@ class OpticalReaderSolverGUI:
 
                 answer, source = None, None
                 if result:
-                    # Correct any '+' that the pixels actually show as a
-                    # division glyph BEFORE normalisation ever sees it —
-                    # see correct_ocr_operators()'s docstring. `arr` is
-                    # the same binarized frame already used for OCR, so
-                    # bbox coordinates line up with it directly.
-                    raw = self.core.correct_ocr_operators(result, arr)
+                    # Pick the most plausible expression out of possibly
+                    # several OCR tokens (a stray date/label alongside the
+                    # real question if the capture box isn't tight), and
+                    # correct any '+' the pixels actually show as a
+                    # division glyph along the way — see
+                    # select_math_ocr_text()'s docstring. `arr` is the same
+                    # binarized frame already used for OCR, so bbox
+                    # coordinates line up with it directly.
+                    raw = self.core.select_math_ocr_text(result, arr)
                     if raw != self.core.last_question:
                         self.core.last_question = raw
                         answer, source = self.core.handle_question(raw)
                         self._update_detected_display(raw, answer)
+                        if self.save_ocr_captures_var.get():
+                            self._save_ocr_capture(sct_img, arr, raw, answer, source)
                         # Reschedule the 50ms reset regardless of whether this
                         # reading solved — previously this only ran inside
                         # "if answer is not None", so a reading that FAILED to

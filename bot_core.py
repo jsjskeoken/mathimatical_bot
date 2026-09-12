@@ -613,6 +613,51 @@ class BotCore:
 
     _DATE_SHAPE_RE = re.compile(r"^\s*\d{1,4}\s*/\s*\d{1,2}\s*/\s*\d{1,4}\s*$")
 
+    # Every raw character normalise() can turn into a canonical operator,
+    # mapped to that canonical form. select_math_ocr_text needs this same
+    # mapping for its own operator-presence check below — using a narrower
+    # set here than normalise() actually understands would silently reject
+    # real candidates (e.g. "4x4" or a directly-OCR'd, uncorrected "÷")
+    # before they ever reach the solver, even though normalise() would
+    # have handled them fine.
+    _OPERATOR_CANONICAL = {
+        '+': '+', '-': '-', '*': '*', '/': '/',
+        '×': '*', 'x': '*', 'X': '*',
+        '÷': '/', ':': '/',
+    }
+    _OPERATOR_CHARS_RE = re.compile(
+        '[' + re.escape(''.join(_OPERATOR_CANONICAL.keys())) + ']')
+
+    def _sort_ocr_results_reading_order(self, ocr_results):
+        """
+        Sorts EasyOCR's raw (bbox, text, conf) tuples into left-to-right,
+        top-to-bottom reading order before candidate generation. EasyOCR's
+        return order reflects its own internal detection pass, not
+        necessarily reading order — for what's supposed to be one line of
+        a math expression, an out-of-order return (e.g. "6" ahead of "7"
+        ahead of "+") would silently scramble every candidate window
+        built downstream. Tokens are bucketed into rows using a coarse
+        tolerance (half the tallest token's height in this result set) so
+        ordinary baseline/font-metric jitter within one visual line isn't
+        mistaken for two separate rows.
+        """
+        if not ocr_results:
+            return ocr_results
+
+        def bbox_bounds(bbox):
+            xs = [p[0] for p in bbox]
+            ys = [p[1] for p in bbox]
+            return min(xs), min(ys), max(ys) - min(ys)
+
+        heights = [bbox_bounds(item[0])[2] for item in ocr_results]
+        row_tolerance = max(8, max(heights) / 2) if heights else 8
+
+        def sort_key(item):
+            x, y, _ = bbox_bounds(item[0])
+            return (round(y / row_tolerance), x)
+
+        return sorted(ocr_results, key=sort_key)
+
     def select_math_ocr_text(self, ocr_results, full_image):
         """
         Pick the most plausible math expression out of EasyOCR's raw token
@@ -626,9 +671,12 @@ class BotCore:
         Candidates are then built from small contiguous windows of those
         corrected tokens (1–4 tokens), and a candidate is only accepted if
         it: isn't date-shaped (`\\d/\\d/\\d`), uses only operators in
-        enabled_operations, contains both a digit and an operator,
-        normalises to something non-empty with a sane digit-group count,
-        and actually solves.
+        enabled_operations (checked against the CANONICAL form of every
+        operator character normalise() understands — ×, x, X, ÷, : as
+        well as +-*/ — so a candidate isn't rejected here for using a
+        representation normalise() would have handled fine downstream),
+        contains both a digit and an operator, normalises to something
+        non-empty with a sane digit-group count, and actually solves.
 
         enabled_operations is used ONLY to FILTER candidates (skip one that
         uses a disabled operator) — it never converts one operator into
@@ -653,7 +701,7 @@ class BotCore:
         that the same as "OCR found nothing usable this frame".
         """
         tokens = [self.correct_ocr_operators([item], full_image).strip()
-                  for item in ocr_results]
+                  for item in self._sort_ocr_results_reading_order(ocr_results)]
         tokens = [t for t in tokens if t]
         if not tokens:
             return ""
@@ -666,7 +714,10 @@ class BotCore:
 
                 if self._DATE_SHAPE_RE.match(candidate):
                     continue
-                candidate_operators = set(re.findall(r'[+\-*/]', candidate))
+                candidate_operators = {
+                    self._OPERATOR_CANONICAL[ch]
+                    for ch in self._OPERATOR_CHARS_RE.findall(candidate)
+                }
                 if any(op not in self.enabled_operations for op in candidate_operators):
                     continue
                 if not candidate_operators or not re.search(r"\d", candidate):
@@ -1241,6 +1292,70 @@ class BotCore:
             print(f"[CORE] LUT ← '{norm}' → {answer}  ({len(self.lut)} total)")
             if self.ui:
                 self.ui.update_lut_label(len(self.lut))
+
+    def verify_lut(self, auto_fix=True):
+        """
+        Re-checks every LUT entry against solve_algebra() — the exact same
+        solver the app uses for a fresh solve — rather than a separate
+        reimplementation, so this can never disagree with what the app
+        would actually compute today.
+
+        Found via a real audit of this project's own LUT: two kinds of
+        bad entry can end up cached.
+          - The expression is valid and solve_algebra() returns an
+            integer, but it doesn't match what's stored — a wrong cached
+            answer for an otherwise-good question (e.g. "63/9" was
+            stored as 72 instead of 7). Corrected in place.
+          - The expression doesn't solve to an integer at all (None, or
+            a non-integer float) — not something this solver would ever
+            legitimately cache (only integer results get LUT-recorded),
+            so a key like this is almost certainly a mis-OCR'd reading
+            that got associated with an unrelated correct answer purely
+            by coincidence. Removed outright — there's no way to guess
+            what the "correct" stored value should be for a key that
+            doesn't even parse to a sensible question.
+
+        With auto_fix=True (what the GUI button uses): applies the fixes,
+        persists via the same _save_lut_async() path as a normal solve,
+        and updates the GUI count. With auto_fix=False: reports only,
+        changes nothing.
+
+        Returns {"total", "valid", "corrected": [(expr, old, new)],
+        "removed": [(expr, old)]}.
+        """
+        total = len(self.lut)
+        corrected, removed = [], []
+        for expr, stored in list(self.lut.items()):
+            result = self.solve_algebra(expr)
+            is_integer_result = isinstance(result, int) and not isinstance(result, bool)
+
+            if is_integer_result and result == stored:
+                continue  # correct, nothing to do
+
+            if is_integer_result:
+                corrected.append((expr, stored, result))
+                if auto_fix:
+                    self.lut[expr] = result
+            else:
+                removed.append((expr, stored))
+                if auto_fix:
+                    del self.lut[expr]
+
+        if auto_fix and (corrected or removed):
+            self._lut_dirty = True
+            self._save_lut_async()
+            if self.ui:
+                self.ui.update_lut_label(len(self.lut))
+
+        valid = total - len(corrected) - len(removed)
+        print(f"[CORE] LUT verify: {total} entries — {valid} valid, "
+              f"{len(corrected)} corrected, {len(removed)} removed")
+        for expr, old, new in corrected:
+            print(f"[CORE]   corrected '{expr}': {old} → {new}")
+        for expr, old in removed:
+            print(f"[CORE]   removed '{expr}' (stored {old}, doesn't solve to an integer)")
+        return {"total": total, "valid": valid,
+                "corrected": corrected, "removed": removed}
 
     def clear_lut(self):
         """Called by the GUI Clear LUT button. Only wipes the LUT — session cache is unaffected."""

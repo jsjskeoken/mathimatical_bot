@@ -427,6 +427,19 @@ class OpticalReaderSolverGUI:
         row3.columnconfigure(0, weight=1)
         row3.columnconfigure(1, weight=1)
 
+        # ── Verify LUT — re-checks every cached answer against the real
+        # solver and fixes/removes anything wrong (see verify_lut()'s
+        # docstring for the two kinds of bad entry this catches). ─────────
+        lut_verify_row = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        lut_verify_row.pack(fill="x", pady=(SP_1, 0))
+        verify_lut_btn = self._button(lut_verify_row, "Verify LUT",
+                                      self._verify_lut, kind="secondary")
+        verify_lut_btn.pack(fill="x")
+        self.lut_verify_label = tk.Label(
+            lut_verify_row, text="", fg=C_MUTED, bg=C_SURFACE_ALT,
+            font=F_LABEL, justify="left", anchor="w")
+        self.lut_verify_label.pack(fill="x", pady=(SP_1, 0))
+
         # ── Known operations — FILTERS which operators a candidate
         # expression may use (select_math_ocr_text rejects any candidate
         # containing a disabled operator); it never converts one operator
@@ -485,6 +498,28 @@ class OpticalReaderSolverGUI:
 
     def update_lut_label(self, count):
         self.lut_label.config(text=f"{count} saved answers")
+
+    def _verify_lut(self):
+        """
+        Re-checks every cached LUT answer against the real solver and
+        fixes/removes anything wrong — see BotCore.verify_lut()'s
+        docstring for the two kinds of bad entry this catches. Runs
+        synchronously; the LUT is a small dict (tens to low hundreds of
+        entries for this app) and solve_algebra() on each is fast, so
+        this doesn't need to be backgrounded the way OCR/clicking do.
+        """
+        report = self.core.verify_lut(auto_fix=True)
+        parts = [f"{report['valid']} valid"]
+        if report["corrected"]:
+            parts.append(f"{len(report['corrected'])} corrected")
+        if report["removed"]:
+            parts.append(f"{len(report['removed'])} removed")
+        summary = f"{report['total']} entries — " + ", ".join(parts)
+        self.lut_verify_label.config(text=summary)
+        if report["corrected"] or report["removed"]:
+            self.lut_verify_label.config(fg=C_RED)
+        else:
+            self.lut_verify_label.config(fg=C_GREEN)
 
     def update_counter_label(self, answers, ready):
         self.counter_label.config(text=f"Answers {answers}/10  ·  Ready {ready}")

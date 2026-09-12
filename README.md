@@ -78,6 +78,18 @@ or on Windows, just run `launch_solver.bat`, which auto-detects a working Python
 
 `F8` toggles pause/resume globally.
 
+## Troubleshooting
+
+**A package still won't import (or VS Code still shows unresolved-import errors) even after installing with `--user`.**
+
+This usually means a package is already sitting in Python's shared/global site-packages — e.g. from an earlier install attempt that got partway through before hitting a permissions wall, or something that came pre-installed on a shared school/lab machine's Python. When that happens, `pip install --user X` can see a version of `X` already "installed" globally and skip putting a working copy in your own profile, even though the global one is broken, incomplete, or not something your account can actually load.
+
+Force a fresh copy into your own profile regardless of what's already present globally:
+```bash
+pip install --user --force-reinstall easyocr opencv-python numpy sympy pyautogui mss pillow pynput certifi
+```
+`--force-reinstall` skips the "already satisfied" check and reinstalls everything — `certifi` included — into your user site-packages, so you end up with a complete set of packages you actually own and can write to, instead of a partial global copy you can't fix.
+
 ## Known limitations
 
 - **Negative answers can't be submitted.** The on-screen keypad has no minus-sign key, so a question that resolves to a negative number is solved correctly (and shown in the GUI) but the click is skipped — check the console for `[CORE] [SKIP] '-N' has unmapped chars`.

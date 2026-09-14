@@ -299,6 +299,11 @@ class BotCore:
         # heuristic this project already removed once. See
         # select_math_ocr_text()'s docstring.
         self.enabled_operations       = {'+', '-', '*', '/'}
+        # Real, measured EasyOCR confidence for the last accepted candidate
+        # (set by select_math_ocr_text) — None before any OCR pass runs, or
+        # whenever nothing usable was found. Never a fabricated value; the
+        # GUI's diagnostic line only shows this when it isn't None.
+        self.last_ocr_confidence      = None
 
         # Automation
         self.answers_count            = 0
@@ -658,6 +663,132 @@ class BotCore:
 
         return sorted(ocr_results, key=sort_key)
 
+    _CANDIDATE_SPAN_PENALTY     = 0.05  # score cost per token in the window
+    _CANDIDATE_GEOMETRY_WEIGHT  = 0.08  # small bonus for spatially coherent OCR
+
+    @staticmethod
+    def _candidate_geometry_score(candidate_bboxes):
+        """
+        Scores (0..1) how spatially coherent a candidate's OCR boxes look as
+        ONE math expression — same line, no suspiciously large horizontal
+        gap — rather than as a hard validity check. A stray label/date sitting
+        far away or on another line loses score; ordinary font/layout jitter
+        barely moves it.
+
+        Two components, weighted 0.65 vertical-alignment / 0.35 horizontal-
+        gap-coherence: alignment matters more because "on a different line"
+        is a stronger signal that a token belongs to something else than
+        "somewhat far away on the same line" is — a moderately-spaced but
+        same-line token could still legitimately be part of one expression.
+        This means a same-line-but-distant fragment is only mildly
+        penalized (empirically ~0.68 for a huge same-line gap, vs ~0.3 for
+        a token on a different line entirely) — that's the intended shape,
+        not a bug; verify against the actual weights before assuming a
+        given score is "too high" for an obviously-bad case.
+
+        Single-token or empty candidates return 1.0 (nothing to compare).
+        """
+        if not candidate_bboxes or len(candidate_bboxes) <= 1:
+            return 1.0
+
+        boxes = []
+        for bbox in candidate_bboxes:
+            try:
+                xs = [float(p[0]) for p in bbox]
+                ys = [float(p[1]) for p in bbox]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not xs or not ys:
+                continue
+            left, right = min(xs), max(xs)
+            top, bottom = min(ys), max(ys)
+            width = max(1.0, right - left)
+            height = max(1.0, bottom - top)
+            boxes.append((left, right, (top + bottom) / 2.0, height, width))
+
+        if len(boxes) <= 1:
+            return 1.0
+
+        heights = sorted(b[3] for b in boxes)
+        mid = len(heights) // 2
+        median_height = (heights[mid] if len(heights) % 2 else
+                         (heights[mid - 1] + heights[mid]) / 2.0)
+        median_height = max(median_height, 1.0)
+
+        # One-line expressions shouldn't wander vertically by more than
+        # roughly one character height — a gentle ramp, not a hard cutoff,
+        # so ordinary baseline jitter doesn't matter.
+        y_centers = [b[2] for b in boxes]
+        y_spread = max(y_centers) - min(y_centers)
+        alignment = max(0.0, 1.0 - y_spread / (1.0 * median_height))
+
+        # The worst internal gap, not the average — so one distant stitched
+        # token can't hide behind otherwise-normal spacing.
+        boxes_by_x = sorted(boxes, key=lambda b: b[0])
+        gaps = [max(0.0, boxes_by_x[i + 1][0] - boxes_by_x[i][1])
+                for i in range(len(boxes_by_x) - 1)]
+        max_gap = max(gaps) if gaps else 0.0
+        gap_score = 1.0 / (1.0 + max_gap / (1.5 * median_height))
+
+        return max(0.0, min(1.0, 0.65 * alignment + 0.35 * gap_score))
+
+    def _candidate_score(self, token_confidences, span, start, candidate_bboxes=None):
+        """
+        Scores one candidate window for select_math_ocr_text(). Real
+        EasyOCR confidence decides between candidates, not just gets
+        reported after the fact — average confidence plus a small spatial-
+        coherence bonus (see _candidate_geometry_score) minus a small
+        per-token span penalty, earliest start as the final tiebreak on an
+        exact score tie.
+
+        candidate_bboxes defaults to None (geometry contributes nothing,
+        matching the confidence-only behaviour this replaced) so any
+        existing caller/test using the original 3-argument form keeps
+        working unchanged — verified, not just assumed: `_candidate_score(c,
+        span, start)` and `_candidate_score(c, span, start, None)` produce
+        an identical result.
+
+        Why a PENALTY rather than pure span-first-then-confidence (the
+        original scheme, before confidence weighting): with span as an
+        absolute tiebreak, confidence could never matter unless two
+        candidates had the exact same length, which is rare — a spurious
+        low-confidence token sitting beside the real answer could never be
+        out-voted by confidence even when it obviously should be. Why not
+        pure confidence with no span term at all: a longer candidate that
+        accidentally strings together the real expression with an adjacent
+        unrelated token can still solve to *something*, and without any
+        preference for the shorter reading, a lucky high-confidence noise
+        token could tip a wrong-but-solvable long candidate above the real
+        one.
+
+        Geometry is a SOFT signal layered on top, empirically confirmed to
+        shift the final score by well under 0.1 even between best- and
+        worst-case geometry at identical confidence — it can nudge a close
+        call, it can't override a real confidence gap, and it can never
+        rescue a candidate that failed the hard filters in
+        select_math_ocr_text (date-shape, operator, digit-group count,
+        solvability), which all run before this function is ever called.
+        This function only ranks candidates that already passed every hard
+        filter — it picks the best of several plausible readings, it
+        doesn't decide plausibility. A malformed fragment like a bare "+6"
+        can't win by having good geometry any more than by having high
+        confidence; the digit-group filter that fixed that bug runs first
+        and excludes it regardless of how anything here scores it.
+
+        0.05 per token means a real confidence gap (EasyOCR's values
+        aren't usually razor-close between a clean read and a garbled one)
+        generally wins, while a candidate that's several tokens longer than
+        it needs to be still needs a genuine confidence edge, not just a
+        lucky roll, to be preferred.
+        """
+        avg_confidence = sum(token_confidences) / span
+        geometry = (self._candidate_geometry_score(candidate_bboxes)
+                    if candidate_bboxes is not None else 0.0)
+        return (avg_confidence
+                + self._CANDIDATE_GEOMETRY_WEIGHT * geometry
+                - self._CANDIDATE_SPAN_PENALTY * span,
+                -start)
+
     def select_math_ocr_text(self, ocr_results, full_image):
         """
         Pick the most plausible math expression out of EasyOCR's raw token
@@ -689,24 +820,42 @@ class BotCore:
         above — this function never second-guesses that.
 
         Among the candidates that survive filtering and actually solve,
-        prefers the one spanning the FEWEST tokens (then the earliest
-        start) — not the longest. A longer solvable candidate is more
-        likely to have accidentally stitched the real question together
-        with an adjacent noise token than a shorter one is to have missed
-        real content, since an incomplete expression (e.g. a trailing
-        operator with no right-hand operand) fails to solve and is filtered
-        out before scoring ever sees it.
+        scored by _candidate_score() — real EasyOCR confidence plus a small
+        spatial-coherence bonus (see _candidate_geometry_score) minus a
+        small per-token span penalty (see that method's docstring for the
+        full reasoning). Confidence remains the dominant signal; geometry
+        only nudges a close call. Neither ever overrides the hard filters
+        above that decide plausibility in the first place, so a malformed
+        fragment can't win by having good confidence or good geometry on
+        the characters it does contain.
 
         Returns "" when nothing credible is found — callers should treat
         that the same as "OCR found nothing usable this frame".
+
+        As a side effect, sets self.last_ocr_confidence to the average
+        EasyOCR confidence of the tokens making up the returned candidate
+        (or None if nothing was found) — real, measured data for the GUI's
+        diagnostic line, never a fabricated number. This is a side-channel
+        attribute rather than a second return value so this stays a
+        drop-in replacement at its one call site.
         """
+        sorted_results = self._sort_ocr_results_reading_order(ocr_results)
         tokens = [self.correct_ocr_operators([item], full_image).strip()
-                  for item in self._sort_ocr_results_reading_order(ocr_results)]
-        tokens = [t for t in tokens if t]
+                  for item in sorted_results]
+        confidences = [item[2] for item in sorted_results]
+        bboxes = [item[0] for item in sorted_results]
+        # Keep tokens/confidences/bboxes aligned after dropping empties, so a
+        # window [start:end] into `tokens` still lines up with the same
+        # window into `confidences`/`bboxes` below.
+        paired = [(t, c, b) for t, c, b in zip(tokens, confidences, bboxes) if t]
+        tokens = [t for t, _, _ in paired]
+        confidences = [c for _, c, _ in paired]
+        bboxes = [b for _, _, b in paired]
         if not tokens:
+            self.last_ocr_confidence = None
             return ""
 
-        best, best_score = None, None
+        best, best_score, best_confidence = None, None, None
         for start in range(len(tokens)):
             for end in range(start + 1, min(len(tokens), start + 4) + 1):
                 candidate = " ".join(tokens[start:end])
@@ -738,11 +887,13 @@ class BotCore:
                 if self.solve_algebra(norm) is None:
                     continue
 
-                score = (-span, -start)  # fewer tokens wins; earlier start
-                                          # breaks ties (negated: higher is better)
+                score = self._candidate_score(
+                    confidences[start:end], span, start, bboxes[start:end])
                 if best_score is None or score > best_score:
                     best, best_score = candidate, score
+                    best_confidence = sum(confidences[start:end]) / span
 
+        self.last_ocr_confidence = best_confidence
         return best if best is not None else ""
 
     # ── Normalisation ─────────────────────────────────────────────────────────

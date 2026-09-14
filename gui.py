@@ -23,7 +23,9 @@ from bot_core import (
     MAX_SLOTS, SCALE_X, SCALE_Y,
     MODE_HYBRID, MODE_CALC, MODE_LUT_ONLY,
     FAST_MODE_POLLING, STANDARD_MODE_POLLING,
-    CLICK_RESULT_CLICKED,
+    CLICK_RESULT_CLICKED, CLICK_RESULT_AUTOMATION_OFF,
+    CLICK_RESULT_WRONG_WINDOW, CLICK_RESULT_UNMAPPED_ANSWER,
+    CLICK_RESULT_ERROR,
 )
 import bot_core  # for the mutable globals QUESTION_AREA etc.
 
@@ -43,28 +45,30 @@ OCR_CAPTURE_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # visually consistent and themeable from one place.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Colour — dark utility palette. The purple accent is the one saturated
-# colour in the UI; everything else is either neutral or a single-purpose
-# status colour (success/warning/danger), so nothing competes with it.
-C_BG          = "#14141c"   # app background
-C_SURFACE     = "#1c1c28"   # primary card
-C_SURFACE_ALT = "#20202e"   # secondary panel (advanced area, modals)
-C_BORDER      = "#32324a"   # card/section border
-C_DIVIDER     = "#26263a"   # hairline between rows within a card
+# Colour — restrained dark graphite + muted indigo. Purple/indigo is
+# reserved for active mode / primary action / selected state — it should
+# never be the dominant colour of every card, or the whole app reads as
+# "saturated purple" instead of "one accent among calm neutrals".
+C_BG          = "#101116"   # app background
+C_SURFACE     = "#181a21"   # primary card
+C_SURFACE_ALT = "#1e2029"   # secondary panel (advanced area, modals)
+C_BORDER      = "#2a2d38"   # card/section border
+C_DIVIDER     = "#232631"   # hairline between rows within a card
 
-C_ACCENT       = "#7c6af7"  # primary accent — mode selection, primary button
-C_ACCENT_HOVER = "#9384fa"
+C_ACCENT       = "#8b82d9"  # primary accent — mode selection, primary button
+C_ACCENT_HOVER = "#9e96e8"
 
 C_GREEN   = "#4ade80"   # success / running / enabled
-C_GREEN_BG = "#1c3326"
+C_GREEN_BG = "#193021"
 C_RED     = "#f87171"   # danger / paused / disabled
-C_RED_BG  = "#3a2222"
+C_RED_BG  = "#321e21"
 C_ORANGE  = "#fbbf24"   # warning — used sparingly, never as a default state
-C_CYAN    = "#67e8f9"   # informational accent — "live" indicator only
+C_ORANGE_BG = "#332a13"
+C_CYAN    = "#67e8f9"   # informational accent — "live"/reading indicator only
 
-C_FG        = "#e6e6f0"  # primary text
-C_MUTED     = "#8a8aa3"  # secondary text / labels
-C_MUTED_DIM = "#5c5c73"  # tertiary / helper text
+C_FG        = "#eceef5"  # primary text
+C_MUTED     = "#969aaa"  # secondary text / labels
+C_MUTED_DIM = "#606474"  # tertiary / helper text
 
 # Typography — one Windows-safe family; hierarchy comes from size/weight,
 # not from mixing typefaces. A monospace face is used only where alignment
@@ -82,7 +86,7 @@ F_RESULT   = (FONT_MONO,   16, "bold")   # the solved answer — biggest number 
 F_DETECTED = (FONT_MONO,   10)           # the raw detected expression
 
 # Spacing scale (px) — every pack/grid padding below is one of these.
-SP_1, SP_2, SP_3, SP_4 = 4, 8, 12, 16
+SP_1, SP_2, SP_3, SP_4, SP_5 = 4, 8, 12, 16, 20
 
 # Button colour system — a handful of named *kinds* rather than one-off
 # colours per button, so "this is primary" / "this is dangerous" reads
@@ -178,7 +182,7 @@ class OpticalReaderSolverGUI:
     def _build_root(self):
         self.root = tk.Tk()
         self.root.title("Optical Reader & Solver")
-        self.root.geometry("340x50+50+50")   # height is set for real once content is built
+        self.root.geometry("372x50+50+50")   # height is set for real once content is built
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=C_BG)
@@ -231,6 +235,16 @@ class OpticalReaderSolverGUI:
         return tk.Label(parent, text=text.upper(), fg=C_MUTED, bg=parent["bg"],
                          font=F_SECTION)
 
+    def _pill(self, parent, text, fg, bg, font=None):
+        """
+        A small badge: a Label whose background genuinely contrasts with
+        its parent, read as a compact "pill" even without a true rounded
+        corner (which Tkinter can't do without the Canvas-based approach
+        this file deliberately avoids — see the note above _build_gui).
+        """
+        return tk.Label(parent, text=text, fg=fg, bg=bg,
+                        font=font or F_LABEL, padx=SP_2, pady=1)
+
     def _style_button(self, btn, kind):
         """(Re)apply a named colour kind to a button, including live hover
         feedback. Called at creation and again whenever a stateful button
@@ -258,19 +272,25 @@ class OpticalReaderSolverGUI:
         root = self.root
 
         # ── Status card — the single most important thing on screen: is it
-        # running, and what has it just seen? ─────────────────────────────
-        status_card = self._card(root, outer_pady=(SP_3, 0))
+        # running, and what has it just seen? Status is a real pill badge
+        # (matching bg+fg, see _set_status) rather than large coloured
+        # text, and the mode indicator is a small muted badge rather than
+        # a second competing headline. ───────────────────────────────────
+        status_card = self._card(root, outer_pady=(SP_3, 0), inner_pady=SP_3)
 
         top_row = tk.Frame(status_card, bg=C_SURFACE)
         top_row.pack(fill="x")
-        self.status_label = tk.Label(top_row, text="●  Running",
-                                     fg=C_GREEN, bg=C_SURFACE, font=F_STATUS)
-        self.status_label.pack(side="left")
-        self.mode_label = tk.Label(top_row, text="FAST",
-                                   fg=C_MUTED, bg=C_SURFACE, font=F_LABEL)
-        self.mode_label.pack(side="right", anchor="s", pady=(0, 2))
+        self.status_pill = tk.Frame(top_row, bg=C_GREEN_BG)
+        self.status_pill.pack(side="left")
+        self.status_label = tk.Label(self.status_pill, text="●  Running",
+                                     fg=C_GREEN, bg=C_GREEN_BG,
+                                     font=(FONT_FAMILY, 10, "bold"),
+                                     padx=SP_2, pady=1)
+        self.status_label.pack()
+        self.mode_label = self._pill(top_row, "FAST", C_MUTED, C_SURFACE_ALT)
+        self.mode_label.pack(side="right")
 
-        tk.Frame(status_card, bg=C_DIVIDER, height=1).pack(fill="x", pady=(SP_2, SP_2))
+        tk.Frame(status_card, bg=C_DIVIDER, height=1).pack(fill="x", pady=(SP_3, SP_2))
 
         meta1 = tk.Frame(status_card, bg=C_SURFACE)
         meta1.pack(fill="x")
@@ -289,13 +309,17 @@ class OpticalReaderSolverGUI:
         self.lut_label.pack(side="left")
 
         self.auto_status_label = tk.Label(status_card, text="", fg=C_MUTED,
-                                          bg=C_SURFACE, font=F_HELPER, wraplength=290,
+                                          bg=C_SURFACE, font=F_HELPER, wraplength=320,
                                           justify="left", anchor="w")
         self.auto_status_label.pack(fill="x", pady=(SP_1, 0))
 
-        # ── Detected / Result — surfaces what the solver is doing right now
-        # without requiring the person to read the tiny preview image. ─────
-        det_card = self._card(root)
+        # ── Detected / Result — the visual centrepiece: what did it see,
+        # what did it decide the answer is. The system line underneath
+        # shows only real, measured data (OCR confidence, cache/LUT
+        # source, click outcome) — never a fabricated number — and is
+        # deliberately small/muted so it reads as supporting detail, not
+        # a second headline competing with the result. ────────────────────
+        det_card = self._card(root, inner_pady=SP_3)
         det_cols = tk.Frame(det_card, bg=C_SURFACE)
         det_cols.pack(fill="x")
 
@@ -304,27 +328,32 @@ class OpticalReaderSolverGUI:
         self._section_label(det_left, "Detected").pack(anchor="w")
         self.detected_label = tk.Label(det_left, text="—", fg=C_FG, bg=C_SURFACE,
                                        font=F_DETECTED, anchor="w")
-        self.detected_label.pack(anchor="w", fill="x")
+        self.detected_label.pack(anchor="w", fill="x", pady=(2, 0))
 
         det_right = tk.Frame(det_cols, bg=C_SURFACE)
         det_right.pack(side="right")
         self._section_label(det_right, "Result").pack(anchor="e")
-        self.result_label = tk.Label(det_right, text="—", fg=C_ACCENT, bg=C_SURFACE,
+        self.result_label = tk.Label(det_right, text="—", fg=C_MUTED, bg=C_SURFACE,
                                      font=F_RESULT, anchor="e")
         self.result_label.pack(anchor="e")
 
-        # ── OCR preview — framed like the "live vision" of the app ─────────
+        tk.Frame(det_card, bg=C_DIVIDER, height=1).pack(fill="x", pady=(SP_2, SP_1))
+        self.system_line_label = tk.Label(det_card, text="Waiting for a question…",
+                                          fg=C_MUTED_DIM, bg=C_SURFACE, font=F_HELPER,
+                                          anchor="w")
+        self.system_line_label.pack(anchor="w", fill="x")
+
+        # ── OCR preview — framed like the "live vision" of the app: a
+        # single clickable status pill ("●  Live" / "Off") rather than a
+        # separate dot + text button competing for the same space. ────────
         prev_card = self._card(root)
         hdr = tk.Frame(prev_card, bg=C_SURFACE)
         hdr.pack(fill="x")
         self._section_label(hdr, "OCR Preview").pack(side="left")
-        self._live_dot = tk.Label(hdr, text="●", fg=C_CYAN, bg=C_SURFACE, font=F_HELPER)
-        self._live_dot.pack(side="left", padx=(SP_1, 0))
-        self.preview_toggle_btn = tk.Button(
-            hdr, text="On", fg=C_GREEN, bg=C_SURFACE, bd=0, font=F_LABEL,
-            activeforeground=C_GREEN, activebackground=C_SURFACE,
-            command=self._toggle_preview, cursor="hand2")
+        self.preview_toggle_btn = tk.Label(
+            hdr, text="●  Live", fg=C_CYAN, bg=C_SURFACE, font=F_LABEL, cursor="hand2")
         self.preview_toggle_btn.pack(side="right")
+        self.preview_toggle_btn.bind("<Button-1>", lambda e: self._toggle_preview())
 
         preview_frame = tk.Frame(prev_card, bg=C_BORDER, padx=1, pady=1)
         preview_frame.pack(pady=(SP_2, 0))
@@ -334,17 +363,31 @@ class OpticalReaderSolverGUI:
         self.preview_img_tk = None
 
         # ── Primary controls — Pause/Resume and Automation are the two
-        # actions that matter most, so they're the two largest buttons in
-        # the app and nothing else competes with them for attention. ──────
+        # actions that matter most. Each is one row: a plain label on the
+        # left, a small state pill on the right — rather than the state
+        # being the button's entire two-line caption, which made them the
+        # loudest thing in the whole window. ───────────────────────────────
         primary_card = self._card(root)
-        self.pause_btn = self._button(primary_card, "❚❚  Pause", self._toggle_pause,
-                                      kind="secondary", font=F_BODY_B)
-        self.pause_btn.pack(fill="x")
 
-        self.auto_btn = self._button(
-            primary_card, "Automation\nEnabled", self._toggle_automation,
-            kind="success", font=F_BODY_B)
-        self.auto_btn.pack(fill="x", pady=(SP_2, 0))
+        pause_row = tk.Frame(primary_card, bg=C_SURFACE_ALT, cursor="hand2")
+        pause_row.pack(fill="x")
+        tk.Label(pause_row, text="❚❚  Pause", fg=C_FG, bg=C_SURFACE_ALT,
+                 font=F_BODY_B, padx=SP_3, pady=SP_2).pack(side="left")
+        self.pause_btn = tk.Label(pause_row, text="RUNNING", fg=C_GREEN,
+                                  bg=C_SURFACE_ALT, font=F_LABEL, padx=SP_3)
+        self.pause_btn.pack(side="right")
+        for w in (pause_row, *pause_row.winfo_children()):
+            w.bind("<Button-1>", lambda e: self._toggle_pause())
+
+        auto_row = tk.Frame(primary_card, bg=C_SURFACE_ALT, cursor="hand2")
+        auto_row.pack(fill="x", pady=(SP_2, 0))
+        tk.Label(auto_row, text="Automation", fg=C_FG, bg=C_SURFACE_ALT,
+                 font=F_BODY_B, padx=SP_3, pady=SP_2).pack(side="left")
+        self.auto_btn = tk.Label(auto_row, text="ON", fg=C_GREEN,
+                                 bg=C_SURFACE_ALT, font=F_LABEL, padx=SP_3)
+        self.auto_btn.pack(side="right")
+        for w in (auto_row, *auto_row.winfo_children()):
+            w.bind("<Button-1>", lambda e: self._toggle_automation())
 
         # ── Solver mode — segmented control with a short description of
         # whichever mode is currently active, instead of assuming the
@@ -394,8 +437,10 @@ class OpticalReaderSolverGUI:
         self.advanced_frame = tk.Frame(adv_wrap, bg=C_SURFACE_ALT, padx=SP_3, pady=SP_2)
         # not packed yet — _toggle_advanced() packs/unpacks it
 
+        # LAYOUT ─────────────────────────────────────────────────────────
+        self._section_label(self.advanced_frame, "Layout").pack(anchor="w")
         row1 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
-        row1.pack(fill="x")
+        row1.pack(fill="x", pady=(SP_1, 0))
         self.overlays_toggle_btn = self._button(row1, "Overlays: Shown",
                                                 self._toggle_overlays, kind="ghost")
         self.overlays_toggle_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
@@ -405,50 +450,54 @@ class OpticalReaderSolverGUI:
         row1.columnconfigure(0, weight=1)
         row1.columnconfigure(1, weight=1)
 
-        row2 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
-        row2.pack(fill="x", pady=(SP_1, 0))
-        saves_btn = self._button(row2, "Saved Layouts", self._open_saves_modal,
+        row1b = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        row1b.pack(fill="x", pady=(SP_1, 0))
+        saves_btn = self._button(row1b, "Saved Layouts", self._open_saves_modal,
                                  kind="ghost")
         saves_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
+        reset_def_btn = self._button(row1b, "Reset to Default",
+                                     self._reset_to_defaults, kind="danger")
+        reset_def_btn.grid(row=0, column=1, sticky="ew")
+        row1b.columnconfigure(0, weight=1)
+        row1b.columnconfigure(1, weight=1)
+
+        # SESSION ────────────────────────────────────────────────────────
+        self._section_label(self.advanced_frame, "Session").pack(anchor="w", pady=(SP_3, 0))
+        row2 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
+        row2.pack(fill="x", pady=(SP_1, 0))
         session_reset_btn = self._button(row2, "New Round", self._reset_counter,
                                          kind="ghost")
-        session_reset_btn.grid(row=0, column=1, sticky="ew")
-        row2.columnconfigure(0, weight=1)
-        row2.columnconfigure(1, weight=1)
+        session_reset_btn.pack(fill="x")
 
+        # MEMORY — Verify LUT re-checks every cached answer against the
+        # real solver and fixes/removes anything wrong (see verify_lut()'s
+        # docstring for the two kinds of bad entry this catches). ─────────
+        self._section_label(self.advanced_frame, "Memory").pack(anchor="w", pady=(SP_3, 0))
         row3 = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
         row3.pack(fill="x", pady=(SP_1, 0))
-        reset_def_btn = self._button(row3, "Reset Layout to Default",
-                                     self._reset_to_defaults, kind="danger")
-        reset_def_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
+        verify_lut_btn = self._button(row3, "Verify LUT",
+                                      self._verify_lut, kind="secondary")
+        verify_lut_btn.grid(row=0, column=0, padx=(0, SP_1), sticky="ew")
         clear_lut_btn = self._button(row3, "Clear Saved Answers",
                                      self.core.clear_lut, kind="danger")
         clear_lut_btn.grid(row=0, column=1, sticky="ew")
         row3.columnconfigure(0, weight=1)
         row3.columnconfigure(1, weight=1)
-
-        # ── Verify LUT — re-checks every cached answer against the real
-        # solver and fixes/removes anything wrong (see verify_lut()'s
-        # docstring for the two kinds of bad entry this catches). ─────────
-        lut_verify_row = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
-        lut_verify_row.pack(fill="x", pady=(SP_1, 0))
-        verify_lut_btn = self._button(lut_verify_row, "Verify LUT",
-                                      self._verify_lut, kind="secondary")
-        verify_lut_btn.pack(fill="x")
         self.lut_verify_label = tk.Label(
-            lut_verify_row, text="", fg=C_MUTED, bg=C_SURFACE_ALT,
-            font=F_LABEL, justify="left", anchor="w")
+            self.advanced_frame, text="", fg=C_MUTED, bg=C_SURFACE_ALT,
+            font=F_HELPER, justify="left", anchor="w")
         self.lut_verify_label.pack(fill="x", pady=(SP_1, 0))
 
-        # ── Known operations — FILTERS which operators a candidate
+        # OCR — Known operations FILTERS which operators a candidate
         # expression may use (select_math_ocr_text rejects any candidate
         # containing a disabled operator); it never converts one operator
         # into another. Disabling '+' does NOT make a '+' become '/' —
         # only is_division_glyph's pixel evidence can do that, in
         # correct_ocr_operators. See select_math_ocr_text's docstring. ──
+        self._section_label(self.advanced_frame, "OCR").pack(anchor="w", pady=(SP_3, 0))
         operations_label = tk.Label(self.advanced_frame, text="Known operations",
                                     fg=C_MUTED, bg=C_SURFACE_ALT, font=F_LABEL)
-        operations_label.pack(anchor="w", pady=(SP_2, SP_1))
+        operations_label.pack(anchor="w", pady=(SP_1, SP_1))
         operations_row = tk.Frame(self.advanced_frame, bg=C_SURFACE_ALT)
         operations_row.pack(fill="x")
         operation_defs = [
@@ -470,11 +519,10 @@ class OpticalReaderSolverGUI:
             check.grid(row=0, column=column, sticky="w")
             operations_row.columnconfigure(column, weight=1)
 
-        # ── OCR capture debug logging — off by default. Each solved
-        # question writes two PNGs (original + processed) to
-        # ocr_captures/, which is useful for diagnosing misreads but grows
-        # without bound if left on for a long run, so this is opt-in rather
-        # than always-on. ──────────────────────────────────────────────────
+        # OCR capture debug logging — off by default. Each solved question
+        # writes two PNGs (original + processed) to ocr_captures/, useful
+        # for diagnosing misreads but grows without bound if left on for a
+        # long run, so this is opt-in rather than always-on.
         self.save_ocr_captures_var = tk.BooleanVar(value=False)
         capture_check = tk.Checkbutton(
             self.advanced_frame, text="Save OCR captures (debug)",
@@ -485,7 +533,7 @@ class OpticalReaderSolverGUI:
             selectcolor=C_SURFACE, highlightthickness=0,
             bd=0, padx=SP_1, pady=SP_1, font=F_LABEL,
         )
-        capture_check.pack(anchor="w", pady=(SP_2, 0))
+        capture_check.pack(anchor="w", pady=(SP_1, 0))
 
         self.root.after_idle(self._resize_to_fit)
 
@@ -498,6 +546,20 @@ class OpticalReaderSolverGUI:
 
     def update_lut_label(self, count):
         self.lut_label.config(text=f"{count} saved answers")
+
+    def _set_status(self, text, color):
+        """
+        Single place that sets the status pill's text AND matching
+        background, so "Paused" always renders as a solid red badge and
+        never green-background-red-text — every other place that used to
+        call self.status_label.config(...) directly now goes through this
+        instead, so the pill's background can never drift out of sync
+        with its text colour.
+        """
+        bg_map = {C_GREEN: C_GREEN_BG, C_RED: C_RED_BG, C_ORANGE: C_ORANGE_BG}
+        bg = bg_map.get(color, C_SURFACE_ALT)
+        self.status_pill.config(bg=bg)
+        self.status_label.config(text=text, fg=color, bg=bg)
 
     def _verify_lut(self):
         """
@@ -540,8 +602,8 @@ class OpticalReaderSolverGUI:
         both funnel through this).
         """
         if self.core.paused:
-            self.status_label.config(text="●  Paused", fg=C_RED)
-            self.pause_btn.config(text="▶  Resume")
+            self._set_status("●  Paused", C_RED)
+            self.pause_btn.config(text="PAUSED", fg=C_RED)
             # A pending confirmation is watching for the screen to react to
             # a click, but nothing is being captured/processed while
             # paused — its deadline would just tick past unobserved and
@@ -556,17 +618,57 @@ class OpticalReaderSolverGUI:
             self._pending_confirm_deadline = None
             self._consecutive_unconfirmed  = 0
         else:
-            self.status_label.config(text="●  Running", fg=C_GREEN)
-            self.pause_btn.config(text="❚❚  Pause")
+            self._set_status("●  Running", C_GREEN)
+            self.pause_btn.config(text="RUNNING", fg=C_GREEN)
 
-    def _update_detected_display(self, expr, answer):
+    _CLICK_RESULT_TEXT = {
+        CLICK_RESULT_CLICKED:         "CLICKED",
+        CLICK_RESULT_AUTOMATION_OFF:  "NOT CLICKED · automation off",
+        CLICK_RESULT_WRONG_WINDOW:    "NOT CLICKED · wrong window",
+        CLICK_RESULT_UNMAPPED_ANSWER: "NOT CLICKED · no key for this answer",
+        CLICK_RESULT_ERROR:           "NOT CLICKED · click error",
+    }
+
+    def _update_detected_display(self, expr, answer, source=None, click_result=None):
         """
         GUI-only bookkeeping: surfaces the last thing the solver saw/solved.
         Reads state _main_loop already computes — doesn't change what gets
         detected, solved, or clicked.
+
+        The result colour communicates outcome at a glance (muted = nothing
+        detected yet, dim amber = detected but didn't solve, accent =
+        solved) and the system line underneath spells out source/confidence
+        and whether a click actually happened — using only values the
+        caller actually passed in. source/click_result/confidence default
+        to None (nothing to report) rather than a guessed value, so this
+        never displays something the code doesn't actually know.
         """
         self.detected_label.config(text=expr if expr else "—")
-        self.result_label.config(text=str(answer) if answer is not None else "—")
+
+        if not expr:
+            self.result_label.config(text="—", fg=C_MUTED)
+            self.system_line_label.config(text="Waiting for a question…")
+            return
+
+        if answer is None:
+            self.result_label.config(text="—", fg=C_ORANGE)
+            self.system_line_label.config(text="Detected, not solved yet")
+            return
+
+        self.result_label.config(text=str(answer), fg=C_ACCENT)
+
+        parts = []
+        if source == "lut":
+            parts.append("LUT HIT")
+        elif source == "cache":
+            parts.append("CACHE HIT")
+        elif source == "solve" and self.core.last_ocr_confidence is not None:
+            parts.append(f"OCR {round(self.core.last_ocr_confidence * 100)}%")
+        elif source:
+            parts.append(source.upper())
+        if click_result is not None:
+            parts.append(self._CLICK_RESULT_TEXT.get(click_result, click_result))
+        self.system_line_label.config(text=" · ".join(parts) if parts else "Solved")
 
     def _toggle_ocr_captures(self):
         enabled = self.save_ocr_captures_var.get()
@@ -761,8 +863,7 @@ class OpticalReaderSolverGUI:
         self.core.answer_clicks_enabled = enabled
         self.core.auto_sequence_enabled = enabled
         if enabled:
-            self.auto_btn.config(text="Automation\nEnabled")
-            self._style_button(self.auto_btn, "success")
+            self.auto_btn.config(text="ON", fg=C_GREEN)
             print("[GUI] Automation ENABLED")
         else:
             # Cancel any in-progress sequences immediately
@@ -780,8 +881,7 @@ class OpticalReaderSolverGUI:
             self._pending_confirm_hash     = None
             self._pending_confirm_deadline = None
             self._consecutive_unconfirmed  = 0
-            self.auto_btn.config(text="Automation\nOff")
-            self._style_button(self.auto_btn, "muted_off")
+            self.auto_btn.config(text="OFF", fg=C_RED)
             if reason:
                 self.set_auto_status(reason, "red")
             else:
@@ -795,13 +895,11 @@ class OpticalReaderSolverGUI:
     def _toggle_preview(self):
         self.core.preview_enabled = not self.core.preview_enabled
         if self.core.preview_enabled:
-            self.preview_toggle_btn.config(text="On", fg=C_GREEN)
-            self._live_dot.config(fg=C_CYAN)
+            self.preview_toggle_btn.config(text="●  Live", fg=C_CYAN)
         else:
-            self.preview_toggle_btn.config(text="Off", fg=C_MUTED)
-            self._live_dot.config(fg=C_MUTED_DIM)
+            self.preview_toggle_btn.config(text="Off", fg=C_MUTED_DIM)
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(143, 30, text="Preview off",
+            self.preview_canvas.create_text(143, 30, text="Preview disabled",
                                             fill=C_MUTED, font=F_LABEL)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1021,7 +1119,7 @@ class OpticalReaderSolverGUI:
         self.edit_mode = True
         self._style_button(self.edit_btn, "primary")
         self.edit_btn.config(text="✓  Done editing")
-        self.status_label.config(text="●  Editing", fg=C_ORANGE)
+        self._set_status("●  Editing", C_ORANGE)
         self.set_auto_status("Drag boxes to move them, corners to resize", "orange")
 
         for w in self.overlay_windows:
@@ -1269,6 +1367,9 @@ class OpticalReaderSolverGUI:
                                 sct_img, cached_processed, "frame-cache",
                                 cached_answer, cached_source)
                         click_result = self.core.click_answer(cached_answer, cached_source)
+                        self._update_detected_display(
+                            "(cached frame)", cached_answer,
+                            source=cached_source, click_result=click_result)
                         # Only arm confirmation for a VERIFIED click — click_answer()
                         # can return "known but not submitted" (answer clicks
                         # off, wrong window focused, unmapped answer) just as
@@ -1313,7 +1414,6 @@ class OpticalReaderSolverGUI:
                     if raw != self.core.last_question:
                         self.core.last_question = raw
                         answer, source = self.core.handle_question(raw)
-                        self._update_detected_display(raw, answer)
                         if self.save_ocr_captures_var.get():
                             self._save_ocr_capture(sct_img, arr, raw, answer, source)
                         # Reschedule the 50ms reset regardless of whether this
@@ -1337,11 +1437,15 @@ class OpticalReaderSolverGUI:
                             50, self._reset_last_question)
                         if answer is not None:
                             click_result = self.core.click_answer(answer, source)
+                            self._update_detected_display(
+                                raw, answer, source=source, click_result=click_result)
                             # Same rule as the frame-cache path above: only a
                             # verified CLICKED result arms confirmation.
                             if click_result == CLICK_RESULT_CLICKED:
                                 self._pending_confirm_hash     = current_hash
                                 self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
+                        else:
+                            self._update_detected_display(raw, answer)
 
                 # Cache successful results only. A failed OCR/solve attempt
                 # used to be cached as (None, None) too — meant to save a

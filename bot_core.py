@@ -872,9 +872,18 @@ class BotCore:
                 if not candidate_operators or not re.search(r"\d", candidate):
                     continue
 
+                # Reject malformed OCR tokens where an operator is glued to a
+                # leading digit, e.g. "+6". This prevents a shorter malformed
+                # candidate such as "6 +6" from beating the real "7 + 6".
+                if any(re.match(r'^[+\-*/\xd7\xf7:]\d', tok)
+                       for tok in tokens[start:end]):
+                    continue
+
                 norm = self.normalise(candidate)
                 if self.fast_mode:
-                    norm = re.sub(r'[=?]', '', norm).strip()
+                    # Strip '?' but preserve '=' so equation sides cannot
+                    # concatenate (e.g. 2*+3=11 -> 2*+311).
+                    norm = re.sub(r'\?', '', norm).strip()
                 digit_groups = re.findall(r"\d+", norm)
                 # A leading unary +/- (e.g. "+6" left over from a window
                 # that started mid-expression, like the tail end of "7 + 6")
@@ -923,8 +932,9 @@ class BotCore:
         return re.sub(r'[^0-9+\-*/().=?x ]', '', expr).strip()
 
     def normalize_operators(self, expr):
-        expr = (expr.replace('×','*').replace('x','*').replace('X','*')
-                    .replace('÷','/').replace(':','/'))
+        expr = (expr.replace('×','*').replace('÷','/').replace(':','/'))
+        # Treat x/X as multiplication only when it sits between two digits.
+        expr = re.sub(r'(\d)\s*[xX]\s*(\d)', r'\1*\2', expr)
         return self._op_clean.sub('', expr)
 
     def fix_missing_operator(self, expr):

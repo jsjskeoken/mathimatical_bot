@@ -789,6 +789,23 @@ class BotCore:
                 - self._CANDIDATE_SPAN_PENALTY * span,
                 -start)
 
+    @staticmethod
+    def _split_glued_token(tok):
+        """
+        Split a token where an operator is glued to a leading digit,
+        e.g. "+6" -> ["+", "6"], "×4" -> ["×", "4"]. Such glued tokens are
+        a very common EasyOCR output when the operator glyph is close to the
+        following digit. The malformed-token guard in select_math_ocr_text
+        rejects candidates containing them; splitting BEFORE candidate
+        building recovers the expression instead of dropping it.
+        Also handles trailing-glued: "6+" -> ["6", "+"].
+        """
+        if re.match(r'^[+\-*/\xd7\xf7:]\d', tok):
+            return [tok[0], tok[1:]]
+        if re.search(r'\d[+\-*/\xd7\xf7:]$', tok):
+            return [tok[:-1], tok[-1]]
+        return [tok]
+
     def select_math_ocr_text(self, ocr_results, full_image):
         """
         Pick the most plausible math expression out of EasyOCR's raw token
@@ -851,6 +868,19 @@ class BotCore:
         tokens = [t for t, _, _ in paired]
         confidences = [c for _, c, _ in paired]
         bboxes = [b for _, _, b in paired]
+
+        # Split glued tokens (e.g. "+6" -> ["+","6"]) so candidate windows
+        # built from them aren't rejected by the malformed-token guard below.
+        # This recovers expressions where EasyOCR merged an operator with the
+        # following digit — previously a 0% accuracy failure mode.
+        split_tokens, split_confs, split_bboxes = [], [], []
+        for t, c, b in zip(tokens, confidences, bboxes):
+            parts = BotCore._split_glued_token(t)
+            for i, part in enumerate(parts):
+                split_tokens.append(part)
+                split_confs.append(c)           # inherit the original token's confidence
+                split_bboxes.append(b)           # inherit the original token's bbox
+        tokens, confidences, bboxes = split_tokens, split_confs, split_bboxes
         if not tokens:
             self.last_ocr_confidence = None
             return ""
@@ -863,14 +893,25 @@ class BotCore:
 
                 if self._DATE_SHAPE_RE.match(candidate):
                     continue
+                # In fast mode, reject candidates that contain '=' without '?' —
+                # a stray "x=5" token was being selected over the real expression
+                # because it scored higher. Algebra equations need both = and ?.
+                if self.fast_mode and '=' in candidate and '?' not in candidate:
+                    continue
                 candidate_operators = {
                     self._OPERATOR_CANONICAL[ch]
                     for ch in self._OPERATOR_CHARS_RE.findall(candidate)
                 }
                 if any(op not in self.enabled_operations for op in candidate_operators):
                     continue
-                if not candidate_operators or not re.search(r"\d", candidate):
+                if not re.search(r"\d", candidate):
                     continue
+                # Allow operator-less candidates ONLY if they have ≥2 digit
+                # groups — fix_missing_operator() will insert implicit
+                # multiplication. A single bare number isn't an expression.
+                if not candidate_operators:
+                    if len(re.findall(r"\d+", candidate)) < 2:
+                        continue
 
                 # Reject malformed OCR tokens where an operator is glued to a
                 # leading digit, e.g. "+6". This prevents a shorter malformed
@@ -918,6 +959,7 @@ class BotCore:
         replacements = {
             'z': '2', 's': '5', 'o': '0', 'i': '1',
             '|': '1', 'l': '1', 'g': '9', 'b': '6',
+            'B': '8',   # uppercase B is a common OCR misread for 8
             ':': '/',
             '×': '*',   # must convert BEFORE garbage strip
             '÷': '/',   # must convert BEFORE garbage strip

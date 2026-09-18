@@ -1,0 +1,274 @@
+[CORE] Screen: 1366x768  scale: 1.00x 1.00x
+[CORE] Taskbar detection error: module 'ctypes' has no attribute 'windll'
+[CORE] Taskbar: bottom  offset: (0, 0)
+[CORE] EasyOCR: GPU
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] LUT write #1 invalidated during write — discarding
+[CORE] LUT ← '8*7' → 56  (2 total)
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] LUT ← '8/2' → 4  (3 total)
+[CORE] LUT write #2 invalidated during write — discarding
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] Detected: '6 × 4'  norm: '6*4'
+[CORE] LUT ← '6*4' → 24  (4 total)
+[CORE] Detected: '6 × 4'  norm: '6*4'
+[CORE] Detected: '6 × 4'  norm: '6*4'
+[CORE] Detected: '6 × 4'  norm: '6*4'
+[CORE] Detected: '6 × 4'  norm: '6*4'
+[CORE] Detected: '12 4'  norm: '12*4'
+[CORE] LUT write #4 invalidated during write — discarding
+[CORE] LUT ← '12*4' → 48  (5 total)
+[CORE] Detected: '12 4'  norm: '12*4'
+[CORE] Detected: '12 4'  norm: '12*4'
+[CORE] Detected: '12 4'  norm: '12*4'
+[CORE] Detected: '12 4'  norm: '12*4'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '8+6'
+[CORE] LUT ← '8+6' → 14  (6 total)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '8+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '8+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '8+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '8+6'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] LUT ← '9-0' → 9  (7 total)
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+
+=== CURRENT HEAD (retry/fingerprint architecture + OCR fixes) ===
+category          accuracy  details
+clean            15/    15   plain arithmetic: 5/5; multiplication: 5/5; division: 5/5
+noisy            5/     5   low-conf label beside expr: 5/5
+merged-token     5/     5   whole expr one token: 5/5
+glued-operator   10/    10   '+6' glued to digit: 5/5; '×4' glued to digit: 5/5
+missing-op       5/     5   dropped operator: 5/5
+stray-noise      10/    10   date beside expression: 5/5; pure date token: 5/5
+out-of-order     5/     5   tokens returned out of order: 5/5
+ambiguous-digit  10/    10   B misread for 8 (raw kept; canonicalised B→8 at solve): 5/5; O misread for 0 (raw kept; canonicalised o→0 at solve): 5/5
+OVERALL          65/65
+avg select latency: 0.24 ms  | avg solve latency: 0.126 ms (5 repeats/case)
+
+=== HYBRID OCR + ML (SYNTHETIC pixels — not real-world accuracy) ===
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] LUT ← '6+6' → 12  (8 total)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+  ML OFF  b-misread, pixels are 8 -> ML should correct: raw='b + 6' answer=12 (expected 14)
+  ML OFF  b-misread, pixels are 6 -> ML must not touch: raw='b + 6' answer=12 (expected 12)
+  (backend=mlp, trigger<0.60 conf, accept>=0.85 prob)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'b + 6'  norm: '6+6'
+  ML ON   b-misread, pixels are 8 -> ML should correct: raw='b + 6' answer=12 (expected 14)
+  ML ON   b-misread, pixels are 6 -> ML must not touch: raw='b + 6' answer=12 (expected 12)
+  b-misread, pixels are 8 -> ML should correct [accuracy]: 0/5
+  b-misread, pixels are 6 -> ML must not touch [accuracy]: 5/5
+  ML select latency: 0.69 ms (includes corrector pass on low-conf tokens)
+[CORE] Screen: 1366x768  scale: 1.00x 1.00x
+[CORE] Taskbar detection error: module 'ctypes' has no attribute 'windll'
+[CORE] Taskbar: bottom  offset: (0, 0)
+[CORE] EasyOCR: GPU
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] LUT write #1 invalidated during write — discarding
+[CORE] LUT ← '8*7' → 56  (2 total)
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 * 7'  norm: '8*7'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] LUT write #2 invalidated during write — discarding
+[CORE] LUT ← '8/2' → 4  (3 total)
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] Detected: '8 / 2'  norm: '8/2'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Solver error: invalid syntax (<string>, line 1)
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7+6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '6+6'
+[CORE] LUT ← '6+6' → 12  (4 total)
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '6+6'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: 'B + 6'  norm: '6+6'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] LUT write #4 invalidated during write — discarding
+[CORE] LUT ← '9-0' → 9  (5 total)
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+[CORE] Detected: '9 - O'  norm: '9-0'
+
+=== BASELINE 51b16f4 ===
+category          accuracy  details
+clean            15/    15   plain arithmetic: 5/5; multiplication: 5/5; division: 5/5
+noisy            5/     5   low-conf label beside expr: 5/5
+merged-token     5/     5   whole expr one token: 5/5
+glued-operator   0/    10   '+6' glued to digit: 0/5; '×4' glued to digit: 0/5
+missing-op       0/     5   dropped operator: 0/5
+stray-noise      10/    10   date beside expression: 5/5; pure date token: 5/5
+out-of-order     5/     5   tokens returned out of order: 5/5
+ambiguous-digit  5/    10   B misread for 8 (raw kept; canonicalised B→8 at solve): 0/5; O misread for 0 (raw kept; canonicalised o→0 at solve): 5/5
+OVERALL          45/65
+avg select latency: 0.13 ms  | avg solve latency: 0.100 ms (5 repeats/case)

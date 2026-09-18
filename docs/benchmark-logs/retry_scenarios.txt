@@ -1,0 +1,450 @@
+[CORE] Screen: 1366x768  scale: 1.00x 1.00x
+[CORE] Taskbar detection error: module 'ctypes' has no attribute 'windll'
+[CORE] Taskbar: bottom  offset: (0, 0)
+Retry / fingerprint architecture benchmark
+(keypad actions = individual key presses; a 2-digit submission costs 3 keypad actions
+ — so e.g. NEW S1's 9 keypad actions are its 3 bounded unconfirmed submission
+ attempts at the RetryPolicy cap, NOT 9 separate submissions. Both loops use
+ two-digit answers (13/14/12) throughout, so every submission costs exactly 3.
+
+scenario             metric                            OLD (51b16f4 recon)  NEW (retry/fingerprint)
+---------------------------------------------------------------------------------------------------
+[CORE] EasyOCR: GPU
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (1/3)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (2/3)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (3/3)
+[CORE] All scheduled events cancelled
+[GUI] Answer clicks DISABLED — scheduled AUTO actions cancelled (safety rule) (⚠ 3 unconfirmed clicks — answer clicking paused)
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+S1 frozen-feedback   keypad actions                                      3                        9
+S1 frozen-feedback   submission attempts                                 1                        3
+S1 frozen-feedback   ocr passes                                          1                        1
+S1 frozen-feedback   confirmed submissions                               0                        0
+S1 frozen-feedback   keypad actions beyond confirmed                     3                        9
+S1 frozen-feedback   question states                                     1                        1
+S1 frozen-feedback   clicks enabled at end                            True                    False
+S1 frozen-feedback   description                      static screen, valid question, click lands but screen NEVER changes
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+S2 frozen-failure    keypad actions                                      0                        0
+S2 frozen-failure    submission attempts                                 0                        0
+S2 frozen-failure    ocr passes                                          1                        7
+S2 frozen-failure    confirmed submissions                               0                        0
+S2 frozen-failure    keypad actions beyond confirmed                     0                        0
+S2 frozen-failure    question states                                     1                        1
+S2 frozen-failure    clicks enabled at end                            True                     True
+S2 frozen-failure    description                      frozen screenshot 10 s, OCR returns garbage the whole time
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+S3 clicks-off        keypad actions                                      0                        0
+S3 clicks-off        submission attempts                                 0                        0
+S3 clicks-off        ocr passes                                          1                        1
+S3 clicks-off        confirmed submissions                               0                        0
+S3 clicks-off        keypad actions beyond confirmed                     0                        0
+S3 clicks-off        question states                                     1                        1
+S3 clicks-off        clicks enabled at end                           False                    False
+S3 clicks-off        description                      static screen, valid question, answer clicking OFF
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] 10 answers! Ready: 1
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] 10 answers! Ready: 2
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] 10 answers! Ready: 3
+[CORE] Ready=3 — extended sequence
+[CORE] New answer interrupted extended sequence — resetting
+[CORE] All scheduled events cancelled
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] [SOLVE] Clicking: 13
+[CORE] [LUT] Clicking: 13
+[CORE] 10 answers! Ready: 4
+[CORE] Ready=3 — extended sequence
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[GUI] Click confirmed — screen changed after click
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+[GUI] [FRAME CACHE] 13 (ttl-valid)
+S4 animation         keypad actions                                    120                        3
+S4 animation         submission attempts                                40                        1
+S4 animation         ocr passes                                          2                        2
+S4 animation         confirmed submissions                              39                        1
+S4 animation         keypad actions beyond confirmed                     3                        0
+S4 animation         question states                                     1                        1
+S4 animation         clicks enabled at end                            True                     True
+S4 animation         description                      animation every 200 ms, same question, click CONFIRMS (screen moves on)
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] Detected: '8 # 2'  norm: '8*2'
+[CORE] LUT ← '8*2' → 16  (1 total)
+[CORE] [SOLVE] Clicking: 16
+[CORE] Detected: '7 # 6'  norm: '7*6'
+[CORE] LUT ← '7*6' → 42  (2 total)
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 1
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 2
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 3
+[CORE] Ready=3 — extended sequence
+[CORE] New answer interrupted extended sequence — resetting
+[CORE] All scheduled events cancelled
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 4
+[CORE] Ready=3 — extended sequence
+[CORE] New answer interrupted extended sequence — resetting
+[CORE] All scheduled events cancelled
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 5
+[CORE] Ready=3 — extended sequence
+[CORE] New answer interrupted extended sequence — resetting
+[CORE] All scheduled events cancelled
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] [SOLVE] Clicking: 16
+[CORE] [SOLVE] Clicking: 42
+[CORE] 10 answers! Ready: 6
+[CORE] Ready=3 — extended sequence
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 2 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] Detected: '8 # 2'  norm: '8*2'
+[CORE] LUT ← '8*2' → 16  (1 total)
+[CORE] [SOLVE] Clicking: 16
+[GUI] Click confirmed — screen changed after click
+[CORE] Detected: '7 # 6'  norm: '7*6'
+[CORE] LUT ← '7*6' → 42  (2 total)
+[CORE] [SOLVE] Clicking: 42
+[GUI] Click confirmed — screen changed after click
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+[GUI] [FRAME CACHE] 16 (ttl-valid)
+[GUI] [FRAME CACHE] 42 (ttl-valid)
+S5 alternating-wrong keypad actions                                    180                        6
+S5 alternating-wrong submission attempts                                60                        2
+S5 alternating-wrong ocr passes                                          2                        2
+S5 alternating-wrong confirmed submissions                              59                        2
+S5 alternating-wrong keypad actions beyond confirmed                     3                        0
+S5 alternating-wrong question states                                     2                        2
+S5 alternating-wrong clicks enabled at end                            True                     True
+S5 alternating-wrong description                      OCR alternates two WRONG readings, each solving to a different wrong answer; frames alternate (flicker)
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 2 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] [LUT] Clicking: 13
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '8 + 2'  norm: '8+2'
+[CORE] LUT ← '8+2' → 10  (2 total)
+[CORE] [SOLVE] Clicking: 10
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '8 + 2'  norm: '8+2'
+[CORE] [LUT] Clicking: 10
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 2 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[GUI] Click confirmed — screen changed after click
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '8 + 2'  norm: '8+2'
+[CORE] LUT ← '8+2' → 10  (2 total)
+[CORE] [SOLVE] Clicking: 10
+[GUI] Click confirmed — screen changed after click
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+S6 question-change   keypad actions                                     12                        6
+S6 question-change   submission attempts                                 4                        2
+S6 question-change   ocr passes                                          4                        4
+S6 question-change   confirmed submissions                               2                        2
+S6 question-change   keypad actions beyond confirmed                     6                        0
+S6 question-change   question states                                     2                        2
+S6 question-change   clicks enabled at end                            True                     True
+S6 question-change   description                      7+6 solved & confirmed (screen updates at t=0.3); at t=4 question becomes 8+2, confirmed at t=4.3
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 2 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] OCR operator: '+'  visual classification: not division  corrected operator: '+'
+[CORE] Detected: '7 + 6'  norm: '7+6'
+[CORE] LUT ← '7+6' → 13  (1 total)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (1/3)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (2/3)
+[CORE] [SOLVE] Clicking: 13
+[GUI] [WARN] Click unconfirmed — screen unchanged after click (3/3)
+[CORE] All scheduled events cancelled
+[GUI] Answer clicks DISABLED — scheduled AUTO actions cancelled (safety rule) (⚠ 3 unconfirmed clicks — answer clicking paused)
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+[CORE] [SOLVE] Answer clicking OFF — not clicking 13
+S7 ocr-improves      keypad actions                                      3                        9
+S7 ocr-improves      submission attempts                                 1                        3
+S7 ocr-improves      ocr passes                                          2                        4
+S7 ocr-improves      confirmed submissions                               0                        0
+S7 ocr-improves      keypad actions beyond confirmed                     3                        9
+S7 ocr-improves      question states                                     2                        2
+S7 ocr-improves      clicks enabled at end                            True                    False
+S7 ocr-improves      description                      static screen: garbage for 1 s, then the app rerenders once and the clean reading appears
+
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+[CORE] EasyOCR: GPU
+[CORE] LUT loaded: 1 entries
+[CORE] Hotkey listener active — press f8 to toggle pause
+S8 garbage-flicker   keypad actions                                      0                        0
+S8 garbage-flicker   submission attempts                                 0                        0
+S8 garbage-flicker   ocr passes                                         35                       35
+S8 garbage-flicker   confirmed submissions                               0                        0
+S8 garbage-flicker   keypad actions beyond confirmed                     0                        0
+S8 garbage-flicker   question states                                     1                        2
+S8 garbage-flicker   clicks enabled at end                            True                     True
+S8 garbage-flicker   description                      unreadable question: animated screen (3 pixel variants @200 ms) with garbage OCR for 2 s, frozen 3 s, then a genuinely DIFFERENT unreadable question — episode anchoring vs one constant identity

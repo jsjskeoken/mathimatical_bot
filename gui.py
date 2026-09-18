@@ -7,7 +7,6 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
 import mss
-import hashlib
 import numpy as np
 import ctypes
 import datetime
@@ -27,6 +26,13 @@ from bot_core import (
     CLICK_RESULT_WRONG_WINDOW, CLICK_RESULT_UNMAPPED_ANSWER,
     CLICK_RESULT_ERROR,
 )
+from question_state import (
+    frame_digest, semantic_fingerprint, debug_throttled,
+    OUTCOME_OCR_EMPTY, OUTCOME_UNSOLVED, OUTCOME_NOT_ENABLED,
+    OUTCOME_WRONG_WINDOW, OUTCOME_UNMAPPED, OUTCOME_CLICKED, OUTCOME_ERROR,
+    OUTCOME_CONFIRMED, OUTCOME_UNCONFIRMED,
+)
+from bot_core import visual_signature  # unresolved-visual-identity pixels
 import bot_core  # for the mutable globals QUESTION_AREA etc.
 
 # Windows constants for click-through overlays
@@ -131,44 +137,27 @@ class OpticalReaderSolverGUI:
 
         # High-speed screen capture — mss is 3-5× faster than PIL screen capture
         self._sct             = mss.mss()
-        # MD5 of the last captured frame — if unchanged, skip OCR entirely
+        # Exact-pixel digest of the last frame (BLAKE2b). INFORMATIONAL + click
+        # confirmation ONLY — it never gates OCR or retries. An unchanged frame
+        # with an unsettled question is retried on the retry engine's schedule
+        # (question_state.RetryPolicy), not suppressed by this value.
         self.last_frame_hash  = None
-        # ── frame_answer_cache — PIXEL-LEVEL shortcut, bypasses OCR entirely ─
-        # frame MD5 hash → (answer, source). This is the odd one out among
-        # the four caches in this app (the other three key on the canonical
-        # *expression*; this one keys on raw pixels) — its entire premise is
-        # the assumption that identical pixels mean identical logical
-        # question state. That's normally true within one capture
-        # configuration, but stops being true the moment the capture region,
-        # fast/standard mode, or coordinate profile changes — the same pixel
-        # hash could then (in principle) mean something completely
-        # different. That's why every place that changes those things calls
-        # _clear_transient_state(), which empties this dict along with the
-        # core-side caches; nothing here is exempt from that reset. Capped
-        # at 500 entries (oldest evicted first) and never stores a failed
-        # OCR/solve attempt — see the comment at the write site below.
-        self.frame_answer_cache = {}
 
-        # ── Click confirmation ──────────────────────────────────────────────
-        # Precisely what this does and doesn't prove: it's SCREEN-CHANGE
-        # detection, not answer-acceptance verification. We already hash
-        # every frame anyway (for the frame-answer-cache), so after a real
-        # click we watch for that hash to change within CONFIRM_TIMEOUT.
-        # A change means "the captured region looks different than it did
-        # right after we clicked" — that's a good, cheap signal that
-        # something happened, but it can't distinguish our click landing
-        # correctly from an unrelated animation in the same region, and it
-        # can't detect a click that landed on the wrong control but still
-        # caused *some* visible change. Getting real submission-accepted
-        # proof would mean knowing something about the target UI, which is
-        # out of scope for a purely external, pixel-level tool. Treat
-        # "confirmed" as "the region changed", not as "the answer was
-        # accepted" — the two usually coincide but aren't the same claim.
-        self._pending_confirm_hash     = None  # frame hash right before the click
-        self._pending_confirm_deadline = None  # time.time() by which we expect a change
-        self._consecutive_unconfirmed  = 0
-        self.CONFIRM_TIMEOUT       = 0.5  # seconds to wait for the screen to change
-        self.UNCONFIRMED_THRESHOLD = 3    # auto-disable automation after this many in a row
+        # Preview scheduling — preview is decoupled from the solver: the loop
+        # captures and (when preview is enabled) updates the preview EVERY
+        # cycle, paused or not. _preview_force makes the very first frame after
+        # Resume update the preview immediately instead of waiting out the
+        # every-Nth-iteration cadence.
+        self._preview_counter = 0
+        self._preview_force   = False
+
+        # ── Click confirmation — now owned by the state machine (qsm), which
+        # also understands what a confirmed/unconfirmed click MEANS for retry
+        # scheduling (question_state.py). The GUI keeps the two constants as
+        # attributes so existing tuning/readouts keep working; their values
+        # come from the shared RetryPolicy, not a magic number here.
+        self.CONFIRM_TIMEOUT       = self.core.retry_policy.click_confirm_timeout
+        self.UNCONFIRMED_THRESHOLD = self.core.retry_policy.unconfirmed_threshold
 
         self._build_root()
         self._build_gui()
@@ -381,13 +370,23 @@ class OpticalReaderSolverGUI:
 
         auto_row = tk.Frame(primary_card, bg=C_SURFACE_ALT, cursor="hand2")
         auto_row.pack(fill="x", pady=(SP_2, 0))
-        tk.Label(auto_row, text="Automation", fg=C_FG, bg=C_SURFACE_ALT,
+        tk.Label(auto_row, text="Answer clicks", fg=C_FG, bg=C_SURFACE_ALT,
                  font=F_BODY_B, padx=SP_3, pady=SP_2).pack(side="left")
-        self.auto_btn = tk.Label(auto_row, text="ON", fg=C_GREEN,
-                                 bg=C_SURFACE_ALT, font=F_LABEL, padx=SP_3)
-        self.auto_btn.pack(side="right")
+        self.answer_clicks_btn = tk.Label(auto_row, text="ON", fg=C_GREEN,
+                                          bg=C_SURFACE_ALT, font=F_LABEL, padx=SP_3)
+        self.answer_clicks_btn.pack(side="right")
         for w in (auto_row, *auto_row.winfo_children()):
-            w.bind("<Button-1>", lambda e: self._toggle_automation())
+            w.bind("<Button-1>", lambda e: self._toggle_answer_clicks())
+
+        seq_row = tk.Frame(primary_card, bg=C_SURFACE_ALT, cursor="hand2")
+        seq_row.pack(fill="x", pady=(SP_2, 0))
+        tk.Label(seq_row, text="AUTO sequence", fg=C_FG, bg=C_SURFACE_ALT,
+                 font=F_BODY_B, padx=SP_3, pady=SP_2).pack(side="left")
+        self.auto_seq_btn = tk.Label(seq_row, text="ON", fg=C_GREEN,
+                                     bg=C_SURFACE_ALT, font=F_LABEL, padx=SP_3)
+        self.auto_seq_btn.pack(side="right")
+        for w in (seq_row, *seq_row.winfo_children()):
+            w.bind("<Button-1>", lambda e: self._toggle_auto_sequence())
 
         # ── Solver mode — segmented control with a short description of
         # whichever mode is currently active, instead of assuming the
@@ -604,22 +603,22 @@ class OpticalReaderSolverGUI:
         if self.core.paused:
             self._set_status("●  Paused", C_RED)
             self.pause_btn.config(text="PAUSED", fg=C_RED)
-            # A pending confirmation is watching for the screen to react to
-            # a click, but nothing is being captured/processed while
-            # paused — its deadline would just tick past unobserved and
-            # later read as a false "unconfirmed" the moment we resume.
-            # Drop it: pausing didn't fail the click, it just means we
-            # stopped watching for the result. Reset the whole streak, too —
-            # a deliberate pause is a clean boundary; carrying a 2-out-of-3
-            # unconfirmed count across it means one unrelated blip after
-            # resuming could trip the safety pause for something that
-            # happened in a completely different session of watching.
-            self._pending_confirm_hash     = None
-            self._pending_confirm_deadline = None
-            self._consecutive_unconfirmed  = 0
+            # Pausing stops the solver — and with it the digest watcher that
+            # would have resolved a pending click confirmation. Drop it via
+            # the state machine (which also resets the unconfirmed streak): a
+            # deliberate pause is a clean boundary, and a deadline elapsing
+            # unobserved must never later read as a false "unconfirmed".
+            self.core.qsm.on_pause()
         else:
             self._set_status("●  Running", C_GREEN)
             self.pause_btn.config(text="RUNNING", fg=C_GREEN)
+            # Resume must restore normal operation IMMEDIATELY: the state
+            # machine treats the current question as freshly sighted (no
+            # waiting out a backoff that started before the pause), and the
+            # next loop cycle updates the preview at once instead of waiting
+            # for the every-Nth-iteration cadence.
+            self.core.qsm.on_resume()
+            self._preview_force = True
 
     _CLICK_RESULT_TEXT = {
         CLICK_RESULT_CLICKED:         "CLICKED",
@@ -740,25 +739,18 @@ class OpticalReaderSolverGUI:
         invalidation point, called from every place that changes what's
         being captured or solved (mode switch, coordinate profile load,
         manual reset, reset-to-defaults) and from core's own new-round
-        trigger. Previously a Fast/Standard switch only cleared
-        answer_cache, and loading a coordinate profile cleared nothing at
-        all — so session_cache, frame_answer_cache, and a pending click
-        confirmation (all keyed on the OLD region/mode/click) could keep
-        acting on state that has nothing to do with what's now on screen.
+        trigger.
+
+        This now also resets the layered question state machine (per-question
+        solve/click/retry runtime — retry budgets from the old configuration
+        must never gate the new one) and the TTL frame cache.
         """
         self.core.answer_cache.clear()
         self.core.session_cache.clear()
-        self.frame_answer_cache.clear()
+        self.core.frame_cache.clear()
+        self.core.qsm.reset_round()
         self.last_frame_hash    = None
         self.core.last_question = ""
-        # A pending confirmation was watching for the screen to react to a
-        # click made under the OLD configuration — once that configuration
-        # has changed, its outcome (confirmed or not) no longer means
-        # anything, so drop it rather than let a stale timeout later count
-        # as a false "unconfirmed click" against the new configuration.
-        self._pending_confirm_hash     = None
-        self._pending_confirm_deadline = None
-        self._consecutive_unconfirmed  = 0
         self.update_cache_label(0)
         if reason:
             print(f"[GUI] Cleared session/frame cache ({reason})")
@@ -842,60 +834,81 @@ class OpticalReaderSolverGUI:
         self.update_counter_label(0, 0)
         self.set_auto_status("")
 
-    def _set_automation_enabled(self, enabled, reason=""):
+    def _set_answer_clicks_enabled(self, enabled, reason="", cancel_auto=False):
         """
-        Single place that flips automation on/off and updates the button —
-        used by the manual toggle AND by the auto-pause-on-unconfirmed-clicks
-        safety net, so both stay visually consistent.
+        Set ANSWER-CLICK submission only — nothing else.
 
-        Internally this now sets TWO separate core flags, not one:
-        answer_clicks_enabled (whether a solved answer may be submitted on
-        the keypad — the safety-critical one, and the one the confirmation
-        safety net below is actually reacting to when clicks aren't
-        landing) and auto_sequence_enabled (the optional AUTO 1/2/3
-        sequence). They're kept in lockstep here because this single
-        "Automation" button is still meant to be a top-level kill-switch
-        for all automated clicking, same as before — but click_answer()
-        and _can_auto() in bot_core.py check them independently now, so
-        the safety net trips the flag that actually matters (answer
-        submission) rather than only the bonus sequence around it.
+        This deliberately does NOT touch auto_sequence_enabled, preview,
+        pause, or any solver state: whether a solved answer may be typed on
+        the keypad is an independent control from the AUTO 1/2/3 macro
+        sequence, and the old single "Automation" flag that coupled them
+        meant there was no way to stop just the answer submission.
+
+        cancel_auto is a DELIBERATE safety rule, not flag coupling:
+          - The confirmation-failure safety net passes cancel_auto=True. If
+            clicks are demonstrably not landing, any AUTO 1/2/3 step already
+            scheduled by Tk is acting on a screen state that is now
+            suspect — those in-flight actions are cancelled. The AUTO
+            *setting* itself is left alone (the user's choice stays as it
+            was; only the stale scheduled actions are dropped).
+          - A manual toggle passes cancel_auto=False: turning answer clicks
+            off by hand must not reach into the AUTO sequence at all.
         """
         self.core.answer_clicks_enabled = enabled
-        self.core.auto_sequence_enabled = enabled
         if enabled:
-            self.auto_btn.config(text="ON", fg=C_GREEN)
-            print("[GUI] Automation ENABLED")
+            self.answer_clicks_btn.config(text="ON", fg=C_GREEN)
+            print("[GUI] Answer clicks ENABLED")
         else:
-            # Cancel any in-progress sequences immediately
-            self.core.cancel_all_scheduled_events()
-            self.core.extended_sequence_active = False
             # A pending confirmation was waiting to see whether the click
-            # that started it landed — with automation now off, there's
+            # that started it landed — with answer clicking now off there is
             # nothing further to click, so its timeout no longer means
-            # anything either. Drop it, and reset the streak too: manually
-            # turning automation off and back on is a deliberate action the
-            # user took specifically to reset the subsystem — carrying a
-            # partial unconfirmed-click count across that boundary means
-            # one more blip after re-enabling could trip the safety pause
-            # for clicks that happened before the user intervened at all.
-            self._pending_confirm_hash     = None
-            self._pending_confirm_deadline = None
-            self._consecutive_unconfirmed  = 0
-            self.auto_btn.config(text="OFF", fg=C_RED)
+            # anything. Drop it and reset the streak: (re)enabling answer
+            # clicks is a deliberate boundary the user took specifically to
+            # reset the subsystem.
+            self.core.qsm.drop_confirmation()
+            self.core.qsm.consecutive_unconfirmed = 0
+            if cancel_auto:
+                self.core.cancel_all_scheduled_events()
+                self.core.extended_sequence_active = False
+            self.answer_clicks_btn.config(text="OFF", fg=C_RED)
             if reason:
                 self.set_auto_status(reason, "red")
             else:
                 self.set_auto_status("")
-            print(f"[GUI] Automation DISABLED — all sequences cancelled"
+            print("[GUI] Answer clicks DISABLED"
+                  + (" — scheduled AUTO actions cancelled (safety rule)" if cancel_auto else "")
                   + (f" ({reason})" if reason else ""))
 
-    def _toggle_automation(self):
-        self._set_automation_enabled(not self.core.answer_clicks_enabled)
+    def _set_auto_sequence_enabled(self, enabled):
+        """
+        Set the AUTO 1/2/3 sequence switch only. Turning it off cancels any
+        already-scheduled sequence steps (immediate effect instead of each
+        step no-op'ing through _can_auto). It NEVER touches
+        answer_clicks_enabled: switching the AUTO sequence on does not
+        enable answer submission, and switching it off does not stop
+        ordinary answer clicks.
+        """
+        self.core.auto_sequence_enabled = enabled
+        if enabled:
+            self.auto_seq_btn.config(text="ON", fg=C_GREEN)
+            print("[GUI] AUTO sequence ENABLED")
+        else:
+            self.core.cancel_all_scheduled_events()
+            self.core.extended_sequence_active = False
+            self.auto_seq_btn.config(text="OFF", fg=C_RED)
+            print("[GUI] AUTO sequence DISABLED — scheduled steps cancelled")
+
+    def _toggle_answer_clicks(self):
+        self._set_answer_clicks_enabled(not self.core.answer_clicks_enabled)
+
+    def _toggle_auto_sequence(self):
+        self._set_auto_sequence_enabled(not self.core.auto_sequence_enabled)
 
     def _toggle_preview(self):
         self.core.preview_enabled = not self.core.preview_enabled
         if self.core.preview_enabled:
             self.preview_toggle_btn.config(text="●  Live", fg=C_CYAN)
+            self._preview_force = True   # show something on the next cycle
         else:
             self.preview_toggle_btn.config(text="Off", fg=C_MUTED_DIM)
             self.preview_canvas.delete("all")
@@ -1297,14 +1310,21 @@ class OpticalReaderSolverGUI:
 
     def _main_loop(self):
         """
-        The heartbeat: grab screen, run OCR, dispatch to core.handle_question.
+        The heartbeat — one capture, three independent consumers.
 
-        Pipeline (fastest path first):
-          1. mss capture into raw BGRA buffer
-          2. Hash .bgra — same frame → return immediately (zero work)
-          3. Frame answer cache — known frame → answer without OCR (microseconds)
-          4. Zero-copy numpy → OpenCV preprocess → EasyOCR (first sight only)
-          5. PIL for UI preview only, completely off the solver hot path
+        Layered scheduling (see question_state.py):
+
+          EVERY cycle, paused or not:
+            1. capture frame (single shared mss grab — no duplicate capture)
+            2. exact-frame digest (BLAKE2b) + click-confirmation watcher
+            3. preview update when preview enabled — PAUSE-INDEPENDENT
+            4. target-window tracking
+
+          Only when NOT paused (the solver gate):
+            5. question processing — OCR / solve / click, gated by the
+               retry engine (time-based, bounded), NOT by frame-hash
+               equality. An unchanged frame with an unsettled question is
+               retried on schedule instead of being suppressed forever.
         """
         self.core._prune_scheduled_events()
         # Runs every poll, paused or not — see _track_target_window()'s
@@ -1312,178 +1332,46 @@ class OpticalReaderSolverGUI:
         # instead.
         self.core._track_target_window()
         try:
+            area = (self.core.question_area_fast if self.core.fast_mode
+                    else self.core.question_area)
+
+            # ── 1. Capture ────────────────────────────────────────────────
+            monitor = {
+                "left":   area[0], "top":    area[1],
+                "width":  area[2] - area[0],
+                "height": area[3] - area[1],
+            }
+            sct_img = self._sct.grab(monitor)
+
+            # ── 2. Exact frame digest (layer A). Used ONLY for click
+            # confirmation and as a freshness signal — never as a
+            # suppression gate.
+            digest = frame_digest(sct_img.bgra)
+            self.last_frame_hash = digest
+
+            # ── 3. Click-confirmation watcher (watch-only; runs paused or
+            # not, before any processing, since an unchanged frame after a
+            # click is exactly the failure case being checked).
+            self._run_click_confirmation(digest)
+
+            # ── 4. Preview: decoupled from the solver. Runs while PAUSED so
+            # the operator keeps a live view; the capture above is shared by
+            # both paths (no duplicate screen-capture system).
+            if self.core.preview_enabled:
+                self._update_preview(sct_img, force=self._preview_force)
+                self._preview_force = False
+
+            # ── 5. Solver path — the ONLY thing pause stops.
             if not self.core.paused:
-                area = (self.core.question_area_fast if self.core.fast_mode
-                        else self.core.question_area)
+                self._process_frame(sct_img, digest)
 
-                # ── 1. Capture ────────────────────────────────────────────────
-                monitor = {
-                    "left":   area[0], "top":    area[1],
-                    "width":  area[2] - area[0],
-                    "height": area[3] - area[1],
-                }
-                sct_img = self._sct.grab(monitor)
-
-                # ── 2. Hash on native BGRA buffer (zero-copy) ─────────────────
-                current_hash = hashlib.md5(sct_img.bgra).hexdigest()
-
-                # ── Click confirmation ─────────────────────────────────────────
-                # Runs BEFORE the "unchanged frame" early-return below, since
-                # an unchanged frame after a click is exactly the failure case
-                # we're checking for (the click didn't land, or landed on the
-                # wrong window, and nothing on screen moved).
-                if self._pending_confirm_hash is not None:
-                    if current_hash != self._pending_confirm_hash:
-                        # Screen moved on since the click — good enough
-                        # confirmation without needing to know *why* it moved.
-                        self._pending_confirm_hash = None
-                        self._consecutive_unconfirmed = 0
-                    elif time.time() >= self._pending_confirm_deadline:
-                        self._pending_confirm_hash = None
-                        self._consecutive_unconfirmed += 1
-                        print(f"[GUI] [WARN] Click unconfirmed — screen unchanged "
-                              f"after click ({self._consecutive_unconfirmed}/"
-                              f"{self.UNCONFIRMED_THRESHOLD})")
-                        if self._consecutive_unconfirmed >= self.UNCONFIRMED_THRESHOLD:
-                            self._set_automation_enabled(
-                                False,
-                                f"⚠ {self.UNCONFIRMED_THRESHOLD} unconfirmed clicks — automation paused")
-                            self._consecutive_unconfirmed = 0
-
-                if current_hash == self.last_frame_hash:
-                    self.root.after(self.core.current_polling, self._main_loop)
-                    return
-                self.last_frame_hash = current_hash
-
-                # ── 3. Frame answer cache — skip OCR on known frames ──────────
-                if current_hash in self.frame_answer_cache:
-                    cached_answer, cached_source = self.frame_answer_cache[current_hash]
-                    if cached_answer is not None and self.core.last_question == "":
-                        print(f"[GUI] [FRAME CACHE] {cached_answer}")
-                        if self.save_ocr_captures_var.get():
-                            cached_processed = self.core.preprocess_for_ocr(
-                                np.array(sct_img))
-                            self._save_ocr_capture(
-                                sct_img, cached_processed, "frame-cache",
-                                cached_answer, cached_source)
-                        click_result = self.core.click_answer(cached_answer, cached_source)
-                        self._update_detected_display(
-                            "(cached frame)", cached_answer,
-                            source=cached_source, click_result=click_result)
-                        # Only arm confirmation for a VERIFIED click — click_answer()
-                        # can return "known but not submitted" (answer clicks
-                        # off, wrong window focused, unmapped answer) just as
-                        # easily as "clicked", and checking answer_clicks_enabled
-                        # alone here would arm a confirmation timer for a click
-                        # that never actually happened.
-                        if click_result == CLICK_RESULT_CLICKED:
-                            self._pending_confirm_hash     = current_hash
-                            self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
-                        if self.core._last_question_reset_id is not None:
-                            try:
-                                self.root.after_cancel(
-                                    self.core._last_question_reset_id)
-                            except Exception:
-                                pass
-                        self.core._last_question_reset_id = self.root.after(
-                            50, self._reset_last_question)
-                    self.root.after(self.core.current_polling, self._main_loop)
-                    return
-
-                # ── 4. Zero-copy numpy → OpenCV → EasyOCR (new frame) ─────────
-                raw_np = np.array(sct_img)
-                arr    = self.core.preprocess_for_ocr(raw_np)
-
-                result = self.core.reader.readtext(
-                    arr,
-                    allowlist='0123456789+-*/()=?xX×÷: ',
-                    low_text=0.3, batch_size=1, paragraph=False, min_size=5
-                )
-
-                answer, source = None, None
-                if result:
-                    # Pick the most plausible expression out of possibly
-                    # several OCR tokens (a stray date/label alongside the
-                    # real question if the capture box isn't tight), and
-                    # correct any '+' the pixels actually show as a
-                    # division glyph along the way — see
-                    # select_math_ocr_text()'s docstring. `arr` is the same
-                    # binarized frame already used for OCR, so bbox
-                    # coordinates line up with it directly.
-                    raw = self.core.select_math_ocr_text(result, arr)
-                    if raw != self.core.last_question:
-                        self.core.last_question = raw
-                        answer, source = self.core.handle_question(raw)
-                        if self.save_ocr_captures_var.get():
-                            self._save_ocr_capture(sct_img, arr, raw, answer, source)
-                        # Reschedule the 50ms reset regardless of whether this
-                        # reading solved — previously this only ran inside
-                        # "if answer is not None", so a reading that FAILED to
-                        # solve (garbled OCR, unparseable expression) latched
-                        # last_question permanently with no reset ever
-                        # scheduled. If that exact bad text reappeared (a
-                        # static UI plus minor rendering jitter can change the
-                        # frame hash without changing what OCR reads), it was
-                        # silently skipped forever instead of retried — the
-                        # same "stuck failure" class of bug already fixed for
-                        # frame_answer_cache, just in this separate debounce.
-                        if self.core._last_question_reset_id is not None:
-                            try:
-                                self.root.after_cancel(
-                                    self.core._last_question_reset_id)
-                            except Exception:
-                                pass
-                        self.core._last_question_reset_id = self.root.after(
-                            50, self._reset_last_question)
-                        if answer is not None:
-                            click_result = self.core.click_answer(answer, source)
-                            self._update_detected_display(
-                                raw, answer, source=source, click_result=click_result)
-                            # Same rule as the frame-cache path above: only a
-                            # verified CLICKED result arms confirmation.
-                            if click_result == CLICK_RESULT_CLICKED:
-                                self._pending_confirm_hash     = current_hash
-                                self._pending_confirm_deadline = time.time() + self.CONFIRM_TIMEOUT
-                        else:
-                            self._update_detected_display(raw, answer)
-
-                # Cache successful results only. A failed OCR/solve attempt
-                # used to be cached as (None, None) too — meant to save a
-                # wasted OCR pass on a repeated animation frame, but it also
-                # meant one bad frame (blur, glare, a half-drawn digit) could
-                # get its failure "stuck": if those exact pixels reappeared
-                # later, OCR would be skipped and the earlier failure reused
-                # instead of trying again. A skipped OCR pass is cheap; a
-                # permanently unsolvable question is not.
-                if answer is not None:
-                    # Evict the oldest entry instead of refusing new ones once
-                    # full — dict preserves insertion order, so this is a
-                    # simple FIFO/LRU-ish cap. Previously the cache just
-                    # stopped accepting new frames forever once it hit 500.
-                    if len(self.frame_answer_cache) >= 500:
-                        oldest = next(iter(self.frame_answer_cache))
-                        del self.frame_answer_cache[oldest]
-                    self.frame_answer_cache[current_hash] = (answer, source)
-
-                # ── 5. UI preview — PIL only if enabled ───────────────────────
-                if self.core.preview_enabled:
-                    self.core.preview_loop_counter += 1
-                    if self.core.preview_loop_counter >= PREVIEW_UPDATE_INTERVAL:
-                        self.core.preview_loop_counter = 0
-                        img = Image.frombytes("RGB", sct_img.size,
-                                              sct_img.bgra, "raw", "BGRX")
-                        prev = img.resize((286, 60))
-                        self.preview_img_tk = ImageTk.PhotoImage(prev)
-                        if getattr(self.preview_canvas, '_img_id', None):
-                            self.preview_canvas.itemconfig(
-                                self.preview_canvas._img_id,
-                                image=self.preview_img_tk)
-                        else:
-                            self.preview_canvas._img_id = self.preview_canvas.create_image(
-                                0, 0, anchor=tk.NW, image=self.preview_img_tk)
-
-        except Exception as e:
-            print(f"[GUI] Loop error: {e}")
+        except Exception:
+            # Full traceback, not just the message: a bare print() made
+            # loop bugs (which repeat every cycle) nearly impossible to
+            # diagnose from the console.
+            import traceback
+            print("[GUI] Loop error:")
+            traceback.print_exc()
 
         # Reschedule with crash recovery
         try:
@@ -1495,9 +1383,240 @@ class OpticalReaderSolverGUI:
             except Exception:
                 pass
 
-    def _reset_last_question(self):
-        self.core.last_question           = ""
-        self.core._last_question_reset_id = None
+    # ─────────────────────────────────────────────────────────────────────────
+    # Frame processing (solver path; called only when NOT paused)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _fingerprint_context(self):
+        """
+        Everything besides the expression itself that changes what a
+        question MEANS to the solver: enabled operations, fast/standard
+        mode, and the capture region. Feeds the semantic fingerprint, so a
+        coordinate-profile or mode switch can never collide with the
+        previous configuration's question state.
+        """
+        area = (self.core.question_area_fast if self.core.fast_mode
+                else self.core.question_area)
+        return (f"ops={sorted(self.core.enabled_operations)}|"
+                f"fast={self.core.fast_mode}|area={tuple(area)}")
+
+    def _process_frame(self, sct_img, digest):
+        """
+        OCR → canonical question → semantic fingerprint → retry gate →
+        solve → click policy.
+
+        Replaces the old frame-hash early-return: the frame digest NEVER
+        decides whether processing happens — the retry engine does, on a
+        time schedule, so an unchanged frame with an unsettled question is
+        retried (with backoff, bounded) instead of suppressed.
+        """
+        core = self.core
+        qsm  = core.qsm
+        now  = time.monotonic()
+
+        visual_changed = qsm.observe_visual(digest, now).changed
+
+        # Retry gate. On a visual change we always process (fresh
+        # sighting); on an unchanged frame the retry engine's schedule
+        # decides (first sighting → immediate; then backoff; exhausted
+        # questions re-validate at the capped interval only).
+        decision = qsm.should_process(now)
+        if not visual_changed and not decision.allowed:
+            debug_throttled(f"gate:{decision.reason}",
+                            f"frame unchanged — processing skipped ({decision.reason})")
+            return
+
+        # ── Frame cache: exact pixels recently solved → answer without OCR.
+        # The entry carries the SEMANTIC fingerprint it was solved under, so
+        # a hit still flows through full identity + click-policy checks — a
+        # completed question can never be re-clicked just because its pixels
+        # reappeared (this replaces the old fragile `last_question == ""`
+        # guard). Only consulted on a visual change: on unchanged pixels the
+        # retry engine owns the decision above.
+        cached = core.frame_cache.get(digest) if visual_changed else None
+        fingerprint = None
+        rt = qsm.runtime()
+        if cached is not None:
+            fingerprint = cached.fingerprint
+            canonical   = cached.canonical
+            raw         = cached.canonical
+            conf        = None
+            display     = "(cached frame)"
+            qsm.observe_question(fingerprint, canonical, raw, now)
+            answer, source = cached.answer, cached.source
+            print(f"[GUI] [FRAME CACHE] {answer} (ttl-valid)")
+        elif (not visual_changed and rt is not None and rt.solved
+              and rt.answer is not None):
+            # Retry tick on unchanged pixels with the answer already known
+            # this round: skip the EasyOCR pass entirely — the pixels are
+            # bit-identical, so OCR would return the same reading. The
+            # retry is a bounded CLICK re-attempt, not a re-solve.
+            fingerprint = rt.fingerprint
+            canonical   = rt.canonical
+            raw         = rt.canonical
+            conf        = rt.last_ocr_confidence
+            display     = rt.canonical
+            qsm.observe_question(fingerprint, canonical, raw, now)
+            answer, source = rt.answer, rt.source
+        else:
+            # ── OCR (new pixels, or retry due on unchanged pixels) ────────
+            raw_np = np.array(sct_img)
+            arr    = core.preprocess_for_ocr(raw_np)
+
+            result = core.reader.readtext(
+                arr,
+                allowlist='0123456789+-*/()=?xX×÷: ',
+                low_text=0.3, batch_size=1, paragraph=False, min_size=5
+            )
+
+            raw = core.select_math_ocr_text(result, arr) if result else ""
+            core.last_question = raw
+            canonical = core.canonicalise(raw) if raw else ""
+            conf = core.last_ocr_confidence
+            display = raw
+            if canonical:
+                fingerprint = semantic_fingerprint(
+                    canonical, raw, self._fingerprint_context())
+            else:
+                # UNRESOLVED VISUAL IDENTITY (OCR-flicker loophole fix).
+                # OCR could not produce a canonical expression, so the raw
+                # text is garbage and must NEVER decide identity: garbage
+                # A/B/C from the same screen would otherwise mint three
+                # independent fingerprints, each with a fresh retry budget.
+                # Identity here is the question-region PIXELS — the same
+                # preprocessed image EasyOCR just consumed — matched by
+                # aligned, dead-zoned distance against the current
+                # unresolved episode (small noise/jitter/blink = same
+                # episode, same budget; genuinely changed pixels = new
+                # episode, fresh budget). See docs/REDESIGN_REPORT.md §2.5.
+                fingerprint = qsm.observe_unresolved(
+                    visual_signature(arr), self._fingerprint_context(), now)
+            qsm.observe_question(fingerprint, canonical, raw, now)
+
+            # ── Solve. If the machine already knows this exact question's
+            # answer this round (retry path), don't re-solve — reuse it so
+            # the retry is a bounded click re-attempt, not a solve loop.
+            rt = qsm.runtime()
+            if rt is not None and rt.solved and rt.canonical == canonical \
+                    and rt.answer is not None:
+                answer, source = rt.answer, rt.source
+            elif raw:
+                answer, source = core.handle_question(raw)
+            else:
+                answer, source = None, None
+
+        # ── Outcome recording + click policy (shared by OCR path and
+        # frame-cache path).
+        if answer is None:
+            outcome = OUTCOME_OCR_EMPTY if not raw else OUTCOME_UNSOLVED
+            qsm.record_outcome(outcome, now, ocr_confidence=conf)
+            self._update_detected_display(display, None)
+            return
+
+        rt = qsm.runtime()
+        if rt is not None and rt.done:
+            # Question already completed this round (click confirmed) — the
+            # answer may be re-displayed but must NEVER be re-clicked while
+            # the identity is unchanged. Cache the frame so animation-heavy
+            # screens do not re-OCR a completed question on every change.
+            debug_throttled("click:done",
+                            f"answer {answer} known but question already "
+                            f"completed this round — not re-clicking")
+            self._update_detected_display(display, answer, source=source)
+            if cached is None and fingerprint:
+                core.frame_cache.put(digest, answer, source,
+                                     fingerprint, canonical)
+            return
+        if rt is not None and rt.awaiting_confirmation:
+            # A previous click for THIS question is still being watched —
+            # never click again on top of it (anti-spam core).
+            debug_throttled("click:awaiting",
+                            "click awaiting confirmation — no further click")
+            self._update_detected_display(display, answer, source=source)
+            return
+
+        click_result = core.click_answer(answer, source, norm_expr=canonical)
+        qsm.record_outcome(self._outcome_for_click(click_result), now,
+                           answer=answer, source=source, ocr_confidence=conf)
+        self._update_detected_display(display, answer, source=source,
+                                      click_result=click_result)
+        # Only a VERIFIED click arms confirmation — "known but not
+        # submitted" results must not start a confirmation watch.
+        if click_result == CLICK_RESULT_CLICKED:
+            qsm.arm_confirmation(digest, now)
+        # Frame cache stores successes only (unchanged rule), now with
+        # identity + TTL.
+        if cached is None:
+            core.frame_cache.put(digest, answer, source, fingerprint, canonical)
+
+    @staticmethod
+    def _outcome_for_click(click_result):
+        """Map a CLICK_RESULT_* onto the retry engine's outcome vocabulary."""
+        return {
+            CLICK_RESULT_CLICKED:         OUTCOME_CLICKED,
+            CLICK_RESULT_AUTOMATION_OFF:  OUTCOME_NOT_ENABLED,
+            CLICK_RESULT_WRONG_WINDOW:    OUTCOME_WRONG_WINDOW,
+            CLICK_RESULT_UNMAPPED_ANSWER: OUTCOME_UNMAPPED,
+            CLICK_RESULT_ERROR:           OUTCOME_ERROR,
+        }.get(click_result, OUTCOME_ERROR)
+
+    def _run_click_confirmation(self, digest):
+        """
+        Watch a pending click's outcome. The frame digest changing after a
+        click confirms it (screen-change proof, not acceptance proof — the
+        same semantics as before, deliberately kept); the deadline elapsing
+        with unchanged pixels counts one unconfirmed strike, and the
+        threshold trips the safety net — which now disables ANSWER CLICKING
+        specifically (plus, as a documented rule, cancels already-scheduled
+        AUTO actions whose screen state is now suspect) instead of flipping
+        unrelated solver or preview state.
+        """
+        qsm = self.core.qsm
+        if qsm.pending_confirm_digest is None:
+            return
+        now = time.monotonic()
+        if digest != qsm.pending_confirm_digest:
+            qsm.record_outcome(OUTCOME_CONFIRMED, now)
+            qsm.drop_confirmation()
+            qsm.consecutive_unconfirmed = 0
+            print("[GUI] Click confirmed — screen changed after click")
+        elif now >= (qsm.pending_confirm_deadline or 0):
+            qsm.record_outcome(OUTCOME_UNCONFIRMED, now)
+            qsm.drop_confirmation()
+            qsm.consecutive_unconfirmed += 1
+            print(f"[GUI] [WARN] Click unconfirmed — screen unchanged after "
+                  f"click ({qsm.consecutive_unconfirmed}/{self.UNCONFIRMED_THRESHOLD})")
+            if qsm.consecutive_unconfirmed >= self.UNCONFIRMED_THRESHOLD:
+                self._set_answer_clicks_enabled(
+                    False,
+                    f"⚠ {self.UNCONFIRMED_THRESHOLD} unconfirmed clicks — answer clicking paused",
+                    cancel_auto=True)
+                qsm.consecutive_unconfirmed = 0
+
+    def _update_preview(self, sct_img, force=False):
+        """
+        Preview rendering — runs on the Tk main thread (called from the
+        loop), every PREVIEW_UPDATE_INTERVAL cycles or immediately when
+        forced (resume / re-enable). Independent of pause state.
+        """
+        self._preview_counter += 1
+        if not force and self._preview_counter < PREVIEW_UPDATE_INTERVAL:
+            return
+        self._preview_counter = 0
+        try:
+            img = Image.frombytes("RGB", sct_img.size,
+                                  sct_img.bgra, "raw", "BGRX")
+            prev = img.resize((286, 60))
+            self.preview_img_tk = ImageTk.PhotoImage(prev)
+            if getattr(self.preview_canvas, '_img_id', None):
+                self.preview_canvas.itemconfig(
+                    self.preview_canvas._img_id,
+                    image=self.preview_img_tk)
+            else:
+                self.preview_canvas._img_id = self.preview_canvas.create_image(
+                    0, 0, anchor=tk.NW, image=self.preview_img_tk)
+        except Exception as e:
+            debug_throttled("preview:error", f"preview update failed: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Entry point

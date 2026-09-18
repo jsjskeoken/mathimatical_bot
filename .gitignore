@@ -4,3 +4,7 @@ venv/
 .venv/
 *.log
 ocr_captures/
+ml_model/
+ml_dataset_synthetic/
+ml_dataset/
+bench_lut.json

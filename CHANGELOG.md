@@ -1,185 +1,209 @@
-# Optical Reader & Math Solver — Session Changelog
+# Changelog
 
-Everything done to `bot_core.py`, `gui.py`, `launch_solver.bat`, `README.md`,
-`.gitignore`, and `optical_lut.json` in this session, in one place.
+## Benchmark temp hygiene: nothing temporary ever touches the working tree
 
-## Files in this download
+### Fixed
+- The 51b16f4-era extraction script leaked `tmpXXXXXXXX_51b16f4.py` files
+  into the repository root whenever a run crashed — the Windows cp1252
+  crash left exactly such a file behind (`tempfile.mkstemp` defaults:
+  'tmp' + 8 random chars + the rev as suffix). The rewritten extractor
+  already wrote its baseline module OUTSIDE the repository, but both
+  benchmarks still cleaned their temp dir only on the SUCCESS path
+  (`mkdtemp` + trailing `rmtree`), so a mid-run crash skipped the cleanup.
+  Both benchmarks now own a `TemporaryDirectory` context manager
+  (`open_bench_dir()`) that refuses to resolve inside the repository and
+  removes the whole tree on success AND on exceptions; the baseline module
+  additionally asserts it was written outside the repo.
+- Post-run tripwire: after every benchmark, the working tree is scanned
+  for the exact leftover class (`tmp*.py` and `mathbot_bench_*`; `.git/`
+  and `__pycache__/` skipped). Any NEW leftover fails the run with exit
+  code 1; pre-existing debris from older versions is reported (and safe
+  to delete manually) but never attributed to the current run.
 
-| File | What changed |
-|---|---|
-| `bot_core.py` | Most of the real work — see below |
-| `gui.py` | New Advanced-section controls, safety-net fix, main-loop wiring |
-| `launch_solver.bat` | `--user` pip fallback, `certifi` added |
-| `README.md` | Documents all of the below, plus a Troubleshooting section |
-| `.gitignore` | Added `ocr_captures/` |
-| `optical_lut.json` | Two bad cached answers fixed (see below) |
+### Added
+- 4 temp-hygiene regression tests in `tests/test_benchmark_tooling.py`:
+  the bench dir resolves outside the repo and self-cleans; the extracted
+  baseline module lands only inside the bench dir with the working tree
+  untouched; a failed (bad-rev) extraction leaves zero files anywhere;
+  the leftover detector recognises the exact reported filename
+  (`tmpj39knlqs_51b16f4.py`) and asserts the live repository is clean.
+  115 tests total (was 111).
 
-Not touched: `optical_coords.json` (machine-specific, never safe to share
-across machines), `backup.py`, `logger.py`.
+## Benchmark tooling: Windows-safe baseline extraction + airtight LUT isolation
 
----
+### Fixed
+- `benchmarks/benchmark_ocr.py --baseline <rev>` crashed on Windows while
+  extracting the baseline revision: `subprocess(text=True)` decodes git
+  output with the platform locale codec (cp1252), which explodes on
+  bot_core.py's UTF-8 punctuation — '←'/'→' encode to bytes cp1252 leaves
+  undefined (`UnicodeDecodeError: 'charmap' codec can't decode byte
+  0x8f`), and the mangled pipeline then surfaced as `TypeError: write()
+  argument must be str, not None`. Git output is now captured as BYTES and
+  decoded explicitly as UTF-8 — strict, with context — so a genuinely
+  non-UTF-8 object fails loudly instead of being benchmarked mangled, and
+  genuine git failures (bad revision, missing object) raise with git's
+  stderr instead of being swallowed. The extracted baseline module is
+  written to a per-run temp dir OUTSIDE the repository, so a crash can no
+  longer leave stray files (or `__pycache__`) in the working tree.
+- Benchmark LUT isolation hardened. Both benchmarks redirected the LUT to
+  one SHARED, predictable `bench_lut.json` in the system temp dir: entries
+  accumulated across runs (nondeterministic "LUT loaded: N entries"), and
+  two cores' async saves could in principle race their tmp files (each
+  core owns a sequence counter, and the shared path is read dynamically at
+  save time). Each run now gets a fresh `mkdtemp`'d directory; HEAD and
+  baseline cores get distinct LUT files; the redirect happens strictly
+  AFTER module execution and BEFORE any BotCore is constructed (the
+  module's own top-level `LUT_FILE = os.path.join(_BASE, ...)` cannot
+  overwrite it — that ordering bug had been caught once before); and a
+  drain helper acquires each core's `_lut_write_lock` before the temp dir
+  is removed, so no async save thread can write anywhere after the
+  benchmark finishes. The repository's real `optical_lut.json` is
+  unreachable for the whole process; verified byte-identical before/after
+  both benchmarks.
+- `benchmarks/benchmark_retry.py` output relabeled so the numbers cannot
+  be misread: "clicks" is now "keypad actions" (individual key presses; a
+  2-digit submission costs 3), with a new explicit "submission attempts"
+  metric (distinct `click_answer` calls that fired). NEW S1/S7's 9 keypad
+  actions are exactly the 3 bounded unconfirmed submission attempts at the
+  RetryPolicy cap — production retry behaviour unchanged, presentation
+  only. The benchmark table in docs/REDESIGN_REPORT.md §6.2 was updated to
+  the same naming.
 
-## Bugs fixed
+### Added
+- `tests/test_benchmark_tooling.py` — 4 regression tests pinning the
+  Windows-safe extraction contract: '←'/'→' UTF-8 round-trip (the exact
+  chars that crashed cp1252), loud failure on mangled bytes, loud failure
+  on genuine git errors. 111 tests total (was 107).
 
-### 1. `÷` misread as `+`
-EasyOCR sometimes reads the on-screen `÷` glyph as `+`. Rather than a
-blanket `+`→`/` text rule (which was tried once before, found to be wrong
-far more often than right, and removed), the pixels under every reported
-`+` are checked against the glyph's own bounding box: a genuine plus is
-one connected blob (a cross); `÷` is two dot-shaped blobs stacked with a
-gap, optionally with a wider bar between them. Only corrected to `/` on
-that visual evidence.
+## Unresolved visual question identity (OCR-flicker loophole fix)
 
-`is_division_glyph()` checks both Otsu threshold polarities and requires
-a compact blob in the top third AND bottom third, with an optional
-middle bar that must be visibly wider than the dots to count as
-confirmation. Ambiguous cases are left as `+` rather than guessed.
+### Fixed
+- When OCR produced no canonical expression, question identity fell back
+  to a hash of the RAW OCR text — different garbage readings from one
+  unchanged screen could mint independent fingerprints, each with a fresh
+  retry budget (unbounded reprocessing). Identity for unreadable frames
+  now comes from the question-region PIXELS: `visual_signature()`
+  (96x16 block-mean of the already-preprocessed OCR input, polarity-
+  normalized) + `signature_distance()` (dead-zone L1 with a small
+  alignment search, calibrated: same-question noise <= 0.0043, one-digit
+  change >= 0.0090, threshold 0.0065). An "unresolved episode" anchors on
+  the first unreadable frame; small noise/jitter/blink stays inside the
+  same episode and the SAME bounded retry budget; genuinely changed
+  pixels (or a 30 s timeout) start a fresh episode with a fresh budget.
+  The previous constant-identity degenerate (every unreadable frame
+  sharing one budget) is also gone. Exact unchanged frames are still
+  revalidated exactly on the RetryPolicy schedule — B1 stays dead.
+- Windows test compatibility (found by the first real Windows run:
+  97 passed / 10 failed): the identity tests hardcoded a Linux-only font
+  path — the rendering helper now obtains its font through the existing
+  cross-platform discovery (`synthetic_data.available_fonts()`) and
+  draws text with weight parity (`stroke_width=1`), because absolute
+  signature distances are font-dependent (a one-digit swap on narrow
+  Arial-metric digits measures ~half the reference calibration). The
+  separation assertions now lock the threshold CONTRACT (same-question
+  noise at/below `unresolved_match_threshold`, genuinely changed
+  questions above it) instead of reference-font absolute numbers, and
+  the one-digit episode boundary is locked exactly with synthetic grid
+  signatures. `test_template_backend_learns_digits` no longer asserts a
+  cross-font accuracy property 1-NN class-mean templates do not have
+  (a clean Arial '0' sits closer to the mixed-font 'O' centroid); it
+  verifies the machinery contract instead — template integrity,
+  self/prototype classification, valid class selection, finite
+  predictions — and claims no accuracy. Production code untouched.
 
-### 2. `4x4` / `8x8` (and direct `÷`) not solving
-A regression introduced earlier in this same session: when
-`select_math_ocr_text()` was added to filter out noise tokens (stray
-dates/labels), its operator-detection check only recognized the four
-literal characters `+ - * /`. Your `normalise()` pipeline has always
-handled `×`, `x`, `X`, `÷`, and `:` too — but the new candidate filter
-didn't know that, so it silently rejected any candidate using one of
-those as "no operator found" before it ever reached the solver. Fixed by
-mapping every character `normalise()` understands to its canonical
-operator before checking it.
+### Added
+- `question_state.observe_unresolved()` + `UnresolvedEpisode` + policy
+  knobs (`unresolved_match_threshold`, `unresolved_recent_max`,
+  `unresolved_episode_timeout`, `unresolved_min_ink`).
+- `tests/test_unresolved_identity.py` — 12 regression tests incl. the six
+  required scenarios (garbage A/B/C one episode; noise same episode;
+  genuine change new episode; unchanged-screen retry schedule; alternating
+  garbage cannot reset the budget; real new question fresh budget).
+- `benchmarks/benchmark_retry.py` scenario S8 (garbage-flicker) + a
+  `question_states` metric; raw benchmark logs under docs/benchmark-logs/.
+- README rewritten from the current code; 107 tests total (was 95).
 
-### 3. Click regression (from an earlier debugging session)
-Historically, `target_hwnd` was captured once on Resume, which could get
-stuck pointing at the GUI's own window if focus passed through it. Fixed
-before this session by tracking the foreground window continuously on
-every poll instead.
+## Layered question state machine, retry engine and preview decoupling
 
-### 4. Silent click failures — `fast_click()` had no verification
-`SetCursorPos`'s return value was never checked, and there was zero delay
-between clicks. A silently-failed cursor move (e.g. blocked input to an
-elevated target window) or a click firing faster than the target UI could
-register looked identical to a successful click from the console's
-perspective. Fixed: verify with `GetCursorPos` that the cursor actually
-landed, fall back once to `pyautogui.moveTo`, raise rather than click
-blind if it still didn't land. `KEY_PRESS_DELAY`/`POST_ANSWER_DELAY`
-raised from 0 to 0.025s (tunable constants).
+### Changed
+- Replaced the frame-hash-as-question-state architecture with a layered
+  state machine (`question_state.py`): exact-frame digest (BLAKE2b) is now
+  used only for click confirmation, question identity is a semantic
+  fingerprint over the canonical expression (+ enabled ops, mode, capture
+  region), and retry is time-based and bounded (`RetryPolicy`) instead of
+  pixel-gated. An unchanged frame with an unsettled question is retried
+  with backoff and can never be permanently suppressed.
+- Preview now updates while the solver is paused (single shared capture);
+  resume updates the preview immediately and processes at once.
+- The single "Automation" switch became two independent controls (Answer
+  clicks / AUTO sequence). The unconfirmed-click safety net disables answer
+  clicking specifically and, as a documented rule, cancels in-flight
+  scheduled AUTO actions without flipping the AUTO setting.
+- `frame_answer_cache` replaced by a TTL'd frame cache carrying the
+  question fingerprint (stale entries expire; a hit can never re-click a
+  completed question).
 
-### 5. LUT contained two bad cached answers
-Audited all 52 entries against the real solver. `"63/9"` was cached as
-`72` (should be `7`) — corrected. `"2/19"` was cached as `21`, but `2/19`
-isn't even an integer (~0.105) — removed entirely, since there's no way
-to know what the "real" intended expression was for a key that doesn't
-solve to anything sensible. Everything else in the LUT checked out
-correct.
+### Fixed
+- `clean_hallucinations` mapped uppercase B to 6 (dead 'B'->'8' entry ran
+  after `.lower()`), so a misread 8 became 6; B->8 now runs before
+  lowercasing.
+- `solve_math`'s SymPy path discarded integer algebra solutions in hybrid
+  mode (SymPy `Float.is_integer` is not an integrality test); the value is
+  tested instead.
+- Auto-sequence scheduling crashed in core-only (UI-less) runs.
+- Loop errors now print a full traceback.
 
-### 6. "10000 errors" in VS Code
-Caused by `pip install` needing admin rights to write to Python's shared
-site-packages — on a locked-down school/lab account without admin, the
-install fails or partially fails, leaving imports unresolved, which
-Pylance then flags on every single downstream usage across the ~2,500-line
-codebase. Fixed: `launch_solver.bat` now retries with `pip install --user`
-automatically if the system-wide install fails from a permissions error.
+### Added
+- Optional ML glyph corrector (`ocr_ml.py`, disabled by default) with
+  template + tiny numpy MLP backends, evidence-only correction thresholds
+  and grammar-gated acceptance.
+- Dataset pipeline (`dataset.py`): append-only JSONL + glyph-crop
+  collector (privacy: crops only), human-labelling path, grouped splits,
+  loader for the secondary dataset repository (real-image training starts
+  once labelled crops are pushed there).
+- Synthetic glyph generator (`synthetic_data.py`) and training/eval script
+  (`train_glyph_model.py`) with a deployment gate.
+- Test suite (`tests/`, 95 tests at the time) and two reproducible
+  benchmarks (`benchmarks/`).
 
-### 7. README `demo.gif`
-Went back and forth on this one — worth being upfront about. Removed it
-first based on a zip download not containing the file, then confirmed
-directly against the **live** GitHub repo that `demo.gif` does exist
-there and renders fine (the zip just doesn't include it, likely a
-"Download ZIP" quirk with binary assets). Restored the line. Current
-README has it back in.
+## Earlier history (pre-redesign sessions)
 
----
+### Fixed
+- `÷` misread as `+`: never a blanket text rule — the pixels under each
+  reported `+` are checked against the glyph's own bounding box
+  (`is_division_glyph()`, both Otsu polarities, dot-blobs top+bottom,
+  optional middle bar); only corrected to `/` on that visual evidence,
+  ambiguous cases stay `+`.
+- `4x4` / direct `÷` candidates rejected: the candidate filter only
+  recognized the four literal operator characters and silently rejected
+  candidates using `× x X ÷ :` before normalization could map them; every
+  character `normalise()` understands is now mapped before the check.
+- Silent click failures: `fast_click()` now verifies with `GetCursorPos`
+  that the cursor actually landed, falls back once to `pyautogui.moveTo`,
+  and raises rather than clicking blind; `KEY_PRESS_DELAY` /
+  `POST_ANSWER_DELAY` raised from 0 to 0.025 s.
+- Clicks landing on the wrong window after focus passed through the GUI:
+  the target window is tracked continuously on every poll instead of once
+  on resume.
+- LUT audit: `"63/9"` was cached as `72` (corrected to `7`), `"2/19"`
+  (non-integer) removed; every other entry re-checked against the solver.
+  The **Verify LUT** button automates this audit going forward.
+- `launch_solver.bat` retries with `pip install --user` automatically when
+  the system-wide install hits a permissions wall (locked-down
+  school/lab accounts), so imports stop failing in VS Code.
 
-## New features
-
-### `answer_clicks_enabled` / `auto_sequence_enabled` (was one `automation_enabled`)
-Two separate concepts that used to share one flag: whether a solved
-answer may be submitted on the keypad, vs. whether the optional AUTO
-1/2/3 delayed sequence may run. Splitting them mattered because the
-confirmation-failure safety net (3 consecutive unconfirmed clicks →
-auto-disable) needs to specifically stop answer-submission clicking, not
-just the bonus sequence — a naive rename would have left the safety net
-protecting the wrong thing. Verified directly (not just asserted) that
-Pause already independently gates both systems and wasn't affected by
-this split. The single "Automation" button UI is unchanged — still
-controls both together, same as before from your perspective.
-
-### `select_math_ocr_text()` — candidate selection
-When the capture box catches more than just the question (a stray date,
-label, or fragment), picks the most plausible expression out of the OCR
-tokens instead of naively joining everything. Filters by enabled
-operators, digit-group count, and date-shape, then only considers
-candidates that actually solve, preferring the shortest solvable span.
-`enabled_operations` is a **filter only** — it rejects a candidate using
-a disabled operator, it never converts one operator into another (an
-earlier version of this idea had a regression doing exactly that, which
-was deliberately not carried over).
-
-Tokens are now also sorted top-to-bottom/left-to-right by bounding box
-before candidates are built, since EasyOCR's return order isn't
-guaranteed to match reading order.
-
-### "Known Operations" checkboxes (Advanced)
-+, −, ×, ÷ toggles that drive `enabled_operations` above.
-
-### "Save OCR captures" toggle (Advanced, off by default)
-Writes the original + processed image for each solved question to
-`ocr_captures/`, for diagnosing OCR mistakes. Off by default so a long
-unattended run doesn't accumulate images without bound.
-
-### "Verify LUT" button (Advanced)
-Re-checks every cached answer against the real solver, auto-corrects
-wrong-but-valid entries, removes non-integer ones, shows a live
-`N entries — X valid, Y corrected, Z removed` readout. This is what
-would have caught bug #5 automatically going forward.
-
-### `certifi` support
-EasyOCR's first-run model download can fail with an SSL error on
-machines with a stale certificate store. If `certifi` is installed, its
-CA bundle is used automatically; if not, nothing changes. Fully optional,
-graceful fallback either way.
-
----
-
-## Testing performed
-
-Everything above was tested by actually importing and running the real
-`bot_core.py`/`gui.py` in a Linux sandbox — mocking only what's
-Windows-specific or unavailable (`easyocr`, `pyautogui`, `pynput`,
-`ctypes.windll`, `mss`), running the real Tkinter GUI under a virtual
-display — rather than testing simplified reimplementations. Confirmed
-working end-to-end: the division-glyph classifier, candidate selection
-against the real `normalise()`/`solve_algebra()` (including the exact
-`4x4` and direct-`÷` cases you reported), `verify_lut()`'s correction and
-persistence, `fast_click()`'s verification and fallback path, all three
-`click_answer()` gates, the `_can_auto()` gates, the confirmation safety
-net actually disabling the correct flag (and `click_answer()` genuinely
-refusing afterward, not just a flag changing), the Known Operations
-checkboxes actually affecting candidate selection, and the OCR capture
-toggle defaulting off and not touching disk while off.
-
-**Not testable here, needs your real machine:** actual EasyOCR
-recognition against your real screen/font, real mouse movement, and the
-overlay rendering itself (Windows-only transparency).
-
----
-
-## Known limitations (documented in the README)
-
-- **Negative answers can't be submitted.** No minus-sign key exists on
-  the keypad. The answer is computed and shown correctly, just never
-  clicked. Console shows `[CORE] [SKIP] '-N' has unmapped chars`.
-- **Click automation needs the target window focused.** Console shows
-  `[CORE] [SKIP] Target window not focused` when skipped for this reason.
-- **Repeated unconfirmed clicks auto-disable answer clicking** via the
-  safety net described above.
-
-## Deliberately not done this session
-
-- Alternate OCR preprocessing (2× upscale, keep grayscale) and EasyOCR
-  threshold tuning — both need real-screen benchmarking that can't be
-  done blind; current (faster, working) pipeline kept as-is.
-- Confidence-weighted candidate scoring, adaptive second-pass OCR,
-  temporal frame-to-frame voting, a diagnostic panel, and an Advanced
-  section visual reorganization — all reasonable ideas from a later
-  review, not implemented since each needs either real-machine
-  threshold-tuning or your input on what you actually want the UI to
-  look like.
+### Added
+- `select_math_ocr_text()` candidate selection: when the capture box
+  catches stray tokens, the most plausible expression is picked from the
+  OCR tokens (operator/digit-group/date-shape filters, shortest solvable
+  span wins). `enabled_operations` is a **filter only** — it never converts
+  one operator into another. OCR tokens are sorted into reading order by
+  bounding box first, since EasyOCR's return order isn't guaranteed.
+- "Known Operations" checkboxes (Advanced) driving `enabled_operations`.
+- "Save OCR captures" toggle (Advanced, off by default) writing original +
+  processed images per solved question to `ocr_captures/`.
+- "Verify LUT" button (Advanced): re-checks every cached answer, auto-
+  corrects wrong-but-valid entries, removes non-integer ones.
+- Optional `certifi` support: EasyOCR's first-run model download can fail
+  with an SSL error on stale certificate stores; if `certifi` is installed
+  its CA bundle is used, otherwise nothing changes.

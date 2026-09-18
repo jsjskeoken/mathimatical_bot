@@ -23,6 +23,16 @@ import ctypes.wintypes  # must be imported explicitly — accessing
 import threading
 from pynput import keyboard as pynput_keyboard
 
+# Layered question/retry/click state machine — see question_state.py for the
+# full A–H layer description. Replaces the old "frame hash == question state"
+# concept: the retry engine is time-based and bounded, NOT pixel-gated.
+from question_state import (
+    RetryPolicy, QuestionStateMachine, TTLFrameCache, debug_throttled,
+    OUTCOME_OCR_EMPTY, OUTCOME_UNSOLVED, OUTCOME_NOT_ENABLED,
+    OUTCOME_WRONG_WINDOW, OUTCOME_UNMAPPED, OUTCOME_CLICKED, OUTCOME_ERROR,
+    SIG_GRID_W, SIG_GRID_H,
+)
+
 # EasyOCR's first run downloads its recognition model over HTTPS. On some
 # machines (notably locked-down school/lab accounts, and some corporate
 # networks) Python's bundled certificate store is missing or stale, which
@@ -45,6 +55,32 @@ pyautogui.FAILSAFE = False
 # Remove the 0.1s hidden pause PyAutoGUI injects after every action.
 # A 3-digit answer + OK = 4 actions = 0.4s of dead time without this.
 pyautogui.PAUSE = 0
+
+
+def visual_signature(bin_img) -> bytes:
+    """
+    UNRESOLVED VISUAL SIGNATURE — pixel evidence for a question OCR could
+    not read (the OCR-flicker loophole fix).
+
+    Input: the ALREADY-PREPROCESSED question-region image (the Otsu-
+    binarized array preprocess_for_ocr() produced for EasyOCR). No extra
+    capture, no extra contrast pipeline, no new dependency — numpy/cv2 are
+    already here.
+
+    Output: SIG_GRID_W x SIG_GRID_H (96x16) block-mean cells as uint8
+    bytes, polarity-normalized so ink is always the minority (a dark-on-
+    light and a light-on-dark theme produce the same signature). Consumed
+    by question_state.signature_distance() — small render noise, blur,
+    1-3 px shifts and cursor blinks stay near 0; a genuinely different
+    question jumps well above the policy threshold (calibration numbers in
+    docs/REDESIGN_REPORT.md §2.5).
+    """
+    small = cv2.resize(bin_img, (SIG_GRID_W, SIG_GRID_H),
+                       interpolation=cv2.INTER_AREA).astype(np.int16)
+    if small.mean() > 127:          # ink must be the minority polarity
+        small = 255 - small
+    return small.astype(np.uint8).tobytes()
+
 
 # ── File paths ───────────────────────────────────────────────────────────────
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -239,6 +275,16 @@ CLICK_RESULT_WRONG_WINDOW    = "wrong_window"       # known, not submitted — t
 CLICK_RESULT_UNMAPPED_ANSWER = "unmapped_answer"    # known, not submitted — no key for a digit
 CLICK_RESULT_ERROR           = "click_error"        # attempted, something raised mid-click
 
+# ── ML glyph-corrector gating (evidence-only; implementation in ocr_ml.py) ──
+# The ML layer NEVER touches a high-confidence reading: only glyphs whose OCR
+# confidence is below ML_TRIGGER_CONFIDENCE qualify, and a replacement needs
+# ML_ACCEPT_PROBABILITY class probability. Anything it changes must still pass
+# every downstream hard filter (operator set, digit-group count, solvability),
+# so it can never manufacture an invalid expression on its own.
+ML_TRIGGER_CONFIDENCE = 0.60   # OCR confidence below which ML may be consulted
+ML_ACCEPT_PROBABILITY = 0.85   # ML class probability required to replace a glyph
+ML_MIN_CROP_SIZE      = 6      # px; smaller crops are not classifiable
+
 # ── Global hotkey ─────────────────────────────────────────────────────────────
 # Press this key combination from any window to toggle pause.
 # Default: F8  (change to e.g. pynput_keyboard.Key.f9, or a hotcombo like
@@ -273,8 +319,11 @@ class BotCore:
             print("[CORE] EasyOCR: CPU")
 
         # State
+        # last_question is the last RAW OCR text — display/debug only. It is
+        # deliberately NOT the question identity any more: identity is the
+        # semantic fingerprint over the canonical expression (question_state
+        # .semantic_fingerprint), and retry suppression never keys off it.
         self.last_question            = ""
-        self._last_question_reset_id  = None
         self.paused                   = False
         # HWND of whatever window was in the foreground the moment the bot was
         # last resumed — captured via GetForegroundWindow(), a plain OS
@@ -304,6 +353,24 @@ class BotCore:
         # whenever nothing usable was found. Never a fabricated value; the
         # GUI's diagnostic line only shows this when it isn't None.
         self.last_ocr_confidence      = None
+
+        # ── Layered question state (question_state.py) ──────────────────────
+        # retry_policy: every retry/confirm/TTL knob in one configurable place
+        # qsm:          per-question solve/click/retry runtime + confirmation
+        # frame_cache:  TTL'd "these exact pixels recently meant this answer"
+        #               cache (replaces the old un-TTL'd frame_answer_cache)
+        self.retry_policy             = RetryPolicy()
+        self.qsm                      = QuestionStateMachine(self.retry_policy)
+        self.frame_cache              = TTLFrameCache(self.retry_policy.frame_cache_ttl)
+
+        # ── Optional ML glyph corrector / dataset collector (ocr_ml.py) ─────
+        # Disabled by default: the deterministic pipeline must remain a
+        # complete, valid fallback, and the ML layer is adopted only if a
+        # benchmark on REAL data proves it improves accuracy without adding
+        # false corrections.
+        self.ml_enabled               = False
+        self.ml_corrector             = None
+        self.dataset_collector        = None
 
         # Automation
         self.answers_count            = 0
@@ -883,7 +950,30 @@ class BotCore:
         tokens, confidences, bboxes = split_tokens, split_confs, split_bboxes
         if not tokens:
             self.last_ocr_confidence = None
+            if self.dataset_collector is not None:
+                try:
+                    self.dataset_collector.record_selection(
+                        tokens=[], confidences=[], bboxes=[], image=full_image,
+                        selected="", confidence=None,
+                        enabled_operations=sorted(self.enabled_operations),
+                        fast_mode=self.fast_mode)
+                except Exception as e:
+                    print(f"[CORE] Dataset collector error (ignored): {e}")
             return ""
+
+        # ── Optional ML glyph correction (evidence-only, disabled by default) ──
+        # Runs ONLY on low-confidence tokens containing ambiguous glyphs; a
+        # high-confidence reading is never touched (see ocr_ml.GlyphCorrector
+        # and ML_TRIGGER_CONFIDENCE / ML_ACCEPT_PROBABILITY). Anything it
+        # changes still has to pass every hard filter below (operator set,
+        # digit-group count, solvability), so the ML layer can never by
+        # itself manufacture an invalid or arbitrary expression.
+        if self.ml_enabled and self.ml_corrector is not None:
+            try:
+                tokens, confidences, bboxes = self.ml_corrector.correct_tokens(
+                    tokens, confidences, bboxes, full_image)
+            except Exception as e:
+                print(f"[CORE] ML corrector error (ignored): {e}")
 
         best, best_score, best_confidence = None, None, None
         for start in range(len(tokens)):
@@ -944,6 +1034,19 @@ class BotCore:
                     best_confidence = sum(confidences[start:end]) / span
 
         self.last_ocr_confidence = best_confidence
+        # Dataset collection hook (opt-in; see dataset.py). Captures only the
+        # token/glyph metadata and crops this selection was made from — never
+        # a whole screenshot — so difficult cases can become training data.
+        if self.dataset_collector is not None:
+            try:
+                self.dataset_collector.record_selection(
+                    tokens=tokens, confidences=confidences, bboxes=bboxes,
+                    image=full_image, selected=best or "",
+                    confidence=best_confidence,
+                    enabled_operations=sorted(self.enabled_operations),
+                    fast_mode=self.fast_mode)
+            except Exception as e:
+                print(f"[CORE] Dataset collector error (ignored): {e}")
         return best if best is not None else ""
 
     # ── Normalisation ─────────────────────────────────────────────────────────
@@ -955,6 +1058,12 @@ class BotCore:
         Uses anchored regex to strip '= ?' only at the end (arithmetic → LUT hit)
         and '? =' only at the start, leaving internal '=' intact for algebra.
         """
+        # Uppercase 'B' → '8' must run BEFORE .lower(): lowercase-then-map
+        # turned this entry into dead code — every 'B' became 'b' and was
+        # then mapped by the 'b'→'6' rule, so a misread 8 ("B + 6") was
+        # canonicalised to "6+6" instead of "8+6". Lowercase 'b' keeps its
+        # existing →'6' mapping (lowercase b genuinely resembles 6 more).
+        expr = expr.replace('B', '8')
         expr = expr.lower().strip()
         replacements = {
             'z': '2', 's': '5', 'o': '0', 'i': '1',
@@ -1112,10 +1221,17 @@ class BotCore:
             sol = solve(Eq(sympify(lhs), sympify(rhs)), self._x)
             if sol:
                 result = N(sol[0])
-                # Same keypad constraint as above: don't truncate a
-                # non-integer solution into a confidently wrong integer.
-                if result.is_integer:
-                    answer = int(result)
+                # N() returns a SymPy Float whose .is_integer flag is NOT a
+                # reliable integrality test (an exactly-integral Float still
+                # reports is_integer=False), which silently discarded every
+                # integer algebra solution in hybrid mode (fast mode never
+                # reached this path — '?' is stripped — which is why it went
+                # unnoticed). Test the VALUE, same as the eval() fast path:
+                # an integral result is enterable on the keypad; a
+                # non-integer is unsolved rather than truncated.
+                result_f = float(result)
+                if result_f.is_integer():
+                    answer = int(result_f)
                     self.session_cache[expr] = answer
                     return answer, 'solve'
                 return None, None
@@ -1125,6 +1241,27 @@ class BotCore:
         return None, None
 
     # ── Question handling (called from GUI main_loop) ──────────────────────────
+
+    def canonicalise(self, raw_ocr):
+        """
+        Raw OCR text -> the ONE canonical question key used everywhere a
+        question is identified (solve_math LUT/session keys, answer_cache,
+        the semantic fingerprint, click_answer's cache write).
+
+        Extracted from handle_question so every caller builds the SAME key
+        handle_question solves under — previously click_answer rebuilt this
+        key by hand from self.last_question (which the GUI resets 50 ms
+        after each reading), so a question could be cached under a key the
+        next lookup couldn't reproduce. This is also the canonicalisation
+        step the semantic fingerprint hashes: "7+6", "7 + 6" and "7×?6"
+        all converge here BEFORE any hashing.
+        """
+        norm = self.normalise(raw_ocr)
+        if self.fast_mode:
+            # Strip any remaining '=', '?' and surrounding whitespace.
+            # '8*7' stays '8*7'; '8*7=' or '8*7=?' both become '8*7'.
+            norm = re.sub(r'[=?]', '', norm).strip()
+        return norm
 
     def handle_question(self, raw_ocr):
         """
@@ -1145,13 +1282,7 @@ class BotCore:
           • eval() fast path used instead of SymPy on a cache/LUT miss
           • SymPy is never called at all in fast mode
         """
-        norm = self.normalise(raw_ocr)
-
-        # ── Fast mode: discard algebra markers, force arithmetic key ──────────
-        if self.fast_mode:
-            # Strip any remaining '=', '?' and surrounding whitespace.
-            # '8*7' stays '8*7'; '8*7=' or '8*7=?' both become '8*7'.
-            norm = re.sub(r'[=?]', '', norm).strip()
+        norm = self.canonicalise(raw_ocr)
 
         print(f"[CORE] Detected: {raw_ocr!r}  norm: {norm!r}")
 
@@ -1193,7 +1324,7 @@ class BotCore:
 
     # ── Click answer ──────────────────────────────────────────────────────────
 
-    def click_answer(self, answer, source='solve'):
+    def click_answer(self, answer, source='solve', norm_expr=None):
         """
         Attempt to submit the answer on the on-screen keypad. Returns one of
         the CLICK_RESULT_* constants — "the answer is known" (this function
@@ -1285,11 +1416,12 @@ class BotCore:
             # normalise() + the fast-mode '=' / '?' strip), or a question can
             # get written here under one key and looked up under another —
             # e.g. "7+6=" here vs "7+6" there — so it never actually hits.
-            norm = None
-            if self.last_question:
-                norm = self.normalise(self.last_question)
-                if self.fast_mode:
-                    norm = re.sub(r'[=?]', '', norm).strip()
+            # Use the caller-provided canonical key when available — the SAME
+            # key handle_question solved under. Fall back to rebuilding it
+            # from last_question for direct/legacy callers.
+            norm = norm_expr
+            if norm is None and self.last_question:
+                norm = self.canonicalise(self.last_question)
             if norm and self.fast_mode and norm not in self.answer_cache:
                 self.answer_cache[norm] = int(answer)
                 if self.ui:
@@ -1319,17 +1451,20 @@ class BotCore:
                         self.extended_sequence_active = True
                         print("[CORE] Ready=3 — extended sequence")
 
-                    eid = self.ui.root.after(delay, self.auto_click_area_1_initial)
-                    self.scheduled_events.append(eid)
+                    # Scheduling requires a UI (Tk after()); in headless/core-only
+                    # runs the counter still resets but no sequence is scheduled,
+                    # instead of raising AttributeError mid-click_answer.
+                    if self.ui:
+                        eid = self.ui.root.after(delay, self.auto_click_area_1_initial)
+                        self.scheduled_events.append(eid)
 
-                    if self.ready_count >= 3:
-                        self.ready_count = 0
-                        if self.ui:
+                        if self.ready_count >= 3:
+                            self.ready_count = 0
                             self.ui.update_counter_label(self.answers_count, self.ready_count)
-                        eid = self.ui.root.after(15000, self.clear_cache_for_new_session)
-                        self.scheduled_events.append(eid)
-                        eid = self.ui.root.after(10000, self.auto_click_area_2)
-                        self.scheduled_events.append(eid)
+                            eid = self.ui.root.after(15000, self.clear_cache_for_new_session)
+                            self.scheduled_events.append(eid)
+                            eid = self.ui.root.after(10000, self.auto_click_area_2)
+                            self.scheduled_events.append(eid)
 
             return result
 
@@ -1407,6 +1542,8 @@ class BotCore:
         else:
             self.answer_cache.clear()
             self.session_cache.clear()
+            self.frame_cache.clear()
+            self.qsm.reset_round()
         print("[CORE] Session caches cleared for new round")
 
     def cancel_all_scheduled_events(self):

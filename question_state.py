@@ -37,6 +37,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+# Optional vectorisation of the signature hot path (forensic audit BUG-5).
+# numpy is already a hard dependency of bot_core, so importing it here adds
+# nothing new to production; when it is genuinely absent the module still
+# works via the pure-stdlib fallback below (identical integer math).
+try:
+    import numpy as _np
+except Exception:                                   # pragma: no cover
+    _np = None
+
 # ── Attempt / outcome vocabulary ─────────────────────────────────────────────
 # One vocabulary shared by the retry engine, the GUI loop and the logs, so
 # every retry decision can name exactly why it happened.
@@ -64,14 +73,19 @@ class RetryPolicy:
     retry_backoff: float = 2.0
     # Cap for a single retry delay.
     max_backoff: float = 4.0
-    # Maximum click/processing retries per semantic question. After this,
-    # clicking stops for that question (until its identity changes) but
+    # Maximum click/processing retries per semantic question. After this
+    # (rt.exhausted), CLICKING stops for that question (until its identity
+    # changes — enforced by the click policy in gui._process_frame) while
     # re-validation OCR continues at max_backoff — a question is never
     # permanently suppressed, but it also can never click-spam.
     max_retries_per_question: int = 8
-    # After a CONFIRMED click, suppress any further click of the SAME
-    # question for at least this long (belt-and-braces against duplicate
-    # clicks while the screen is still transitioning).
+    # Cooldown applied after success. On the primary path a CONFIRMED click
+    # sets done=True, which is the strictly stronger gate; this cooldown is
+    # ENFORCED where done no longer protects: when a completed question
+    # reappears as a NEW episode (absence > question_reappear_reset), the
+    # fresh episode's first attempt waits out success_cooldown before any
+    # click — belt-and-braces against a duplicate click of a re-answered
+    # question while its screen is still settling.
     success_cooldown: float = 1.0
     # How long a question's fingerprint must have been OFF-screen before a
     # reappearance counts as a NEW episode (fresh click allowed) rather
@@ -231,6 +245,9 @@ def signature_ink(sig: bytes) -> float:
     """Fraction of cells counted as ink (polarity already normalized)."""
     if not sig:
         return 0.0
+    if _np is not None:
+        arr = _np.frombuffer(sig, dtype=_np.uint8)
+        return int((arr >= 128).sum()) / len(sig)
     return sum(1 for v in sig if v >= 128) / len(sig)
 
 
@@ -257,8 +274,16 @@ def signature_distance(a: bytes, b: bytes, min_ink: float = 0.015,
 
     bail_below: early-exit for match decisions — return as soon as a shift
     scores at or below this value (the caller only needs to know "within
-    threshold", not the exact minimum). Keeps the hot per-frame path to a
-    single grid scan (~1.7 ms in pure stdlib Python).
+    threshold", not the exact minimum).
+
+    Performance (forensic audit BUG-5): the hot path is vectorised with
+    numpy when available — measured on the 96x16 grid, all-no-match worst
+    case drops from ~3.3 ms per signature (~26 ms over an 8-signature ring,
+    i.e. 2x the 10 ms fast-poll budget, on the Tk main thread) to ~0.1 ms
+    per signature (~0.9 ms over the ring). The pure-stdlib fallback keeps
+    identical integer math for environments without numpy. The measured
+    numbers describe this implementation; the threshold CONTRACT is what
+    must hold everywhere (see tests/test_unresolved_identity.py).
     """
     if len(a) != len(b) or len(a) != SIG_GRID_W * SIG_GRID_H:
         return 1.0
@@ -269,6 +294,26 @@ def signature_distance(a: bytes, b: bytes, min_ink: float = 0.015,
 
     best = 1.0
     w, h = SIG_GRID_W, SIG_GRID_H
+    if _np is not None:
+        a2 = _np.frombuffer(a, dtype=_np.uint8).astype(_np.int16).reshape(h, w)
+        b2 = _np.frombuffer(b, dtype=_np.uint8).astype(_np.int16).reshape(h, w)
+        for dy, dx in _SHIFT_ORDER:
+            y0a, y1a = max(0, dy), min(h, h + dy)
+            x0a, x1a = max(0, dx), min(w, w + dx)
+            y0b, y1b = max(0, -dy), min(h, h - dy)
+            x0b, x1b = max(0, -dx), min(w, w - dx)
+            diff = _np.abs(a2[y0a:y1a, x0a:x1a] - b2[y0b:y1b, x0b:x1b])
+            over = diff - _SIG_DEADZONE
+            # int64 accumulator: 1536 cells x (255-48) overflows int16
+            total = int(_np.maximum(over, 0).sum(dtype=_np.int64))
+            dist = total / (_SIG_SPAN * (x1a - x0a) * (y1a - y0a))
+            if dist < best:
+                best = dist
+                if best == 0.0 or (bail_below is not None
+                                   and best <= bail_below):
+                    return best
+        return best
+
     for dy, dx in _SHIFT_ORDER:
         total = 0
         y0a, y1a = max(0, dy), min(h, h + dy)
@@ -429,15 +474,24 @@ class QuestionStateMachine:
         changed = (self._last_digest is not None and digest != self._last_digest)
         self._last_digest = digest
         if changed:
-            # A visual change is evidence the screen moved on: reset the
-            # backoff TIER (next retry sooner) but NOT the per-question
-            # attempt budget — animation jitter must not buy unlimited
-            # retries.
+            # A visual change is evidence the screen moved on. It may pull
+            # the retry deadline EARLIER (the screen moving on is a reason
+            # to re-check soon), but must never PUSH it later: re-pushing
+            # `now + delay` on every frame means a screen animating faster
+            # than same_frame_retry_delay never reaches its deadline at all
+            # — retries starve completely (forensic audit BUG-1). Exhausted
+            # questions keep their calm max_backoff re-validation cadence
+            # (animation must not accelerate an exhausted question's OCR
+            # churn either); done questions are gated by `done` itself. The
+            # tier reset only accelerates — the attempt budget and the
+            # exhausted click-stop still bound everything, so animation can
+            # spend the budget faster but can never exceed it.
             rt = self._runtime.get(self._current_fp)
-            if rt is not None and not rt.done:
+            if rt is not None and not rt.done and not rt.exhausted:
                 rt.backoff_tier = 0
-                if rt.next_allowed > now:
-                    rt.next_allowed = now + self.policy.same_frame_retry_delay
+                rt.next_allowed = min(
+                    rt.next_allowed,
+                    now + self.policy.same_frame_retry_delay)
         return VisualObservation(changed=changed, digest=digest)
 
     @property
@@ -451,11 +505,14 @@ class QuestionStateMachine:
         """
         Observe a question sighting. Identity changes drive:
           - retry-budget reset (a genuinely different question starts fresh)
-          - episode lifecycle: a COMPLETED question seen again after a brief
-            absence (flicker / animation) stays completed — no re-click;
-            the same question reappearing after it has been off-screen for
-            longer than policy.question_reappear_reset starts a NEW episode
-            (fresh click allowed — it is a genuinely new instance).
+          - episode lifecycle: a COMPLETED or EXHAUSTED question seen again
+            after a brief absence (flicker / animation) keeps its state —
+            no re-click; the same question reappearing after it has been
+            off-screen for longer than policy.question_reappear_reset starts
+            a NEW episode (fresh click allowed — it is a genuinely new
+            instance). Applies to done AND exhausted runtimes alike: both
+            are terminal-per-episode states, and a returning question is a
+            new episode, not a resurrection of the old budget.
         """
         now = self._clock() if now is None else now
         if canonical:
@@ -473,14 +530,31 @@ class QuestionStateMachine:
             if rt is None:
                 rt = QuestionRuntime(fingerprint=fingerprint, canonical=canonical,
                                      first_seen=now)
+                if not canonical:
+                    # UNRESOLVED identity (forensic audit, S10 finding): an
+                    # unreadable sighting's first RE-LOOK waits one tier-0
+                    # delay. A readable question is processed immediately
+                    # (quiz responsiveness); an unreadable one has no answer
+                    # to give yet, and without this floor a hostile screen
+                    # that re-renders with large deltas every poll mints a
+                    # fresh immediately-allowed episode per frame — an OCR
+                    # churn loop. The delay matches the first retry tier, so
+                    # genuine unreadable questions are re-read exactly on
+                    # the normal schedule.
+                    rt.next_allowed = now + self.policy.same_frame_retry_delay
                 self._runtime[fingerprint] = rt
             else:
                 inactive_for = (now - rt.inactive_since
                                 if rt.inactive_since is not None else 0.0)
                 rt.inactive_since = None
-                if rt.done and inactive_for > self.policy.question_reappear_reset:
+                if ((rt.done or rt.exhausted)
+                        and inactive_for > self.policy.question_reappear_reset):
                     # Reappearance after other content — a new episode of
                     # this question: fresh click/solve/retry lifecycle.
+                    # (Forensic audit BUG-3: without this, an exhausted
+                    # question could never be clicked again no matter how
+                    # long it had been gone — 'until its identity changes'
+                    # would mean 'until the process restarts'.)
                     rt.done = False
                     rt.clicked = False
                     rt.awaiting_confirmation = False
@@ -491,6 +565,10 @@ class QuestionStateMachine:
                     rt.source = None
                     rt.attempts = 0
                     rt.backoff_tier = 0
+                    # Fresh episode of a previously-CONFIRMED question: the
+                    # first attempt waits out success_cooldown (the knob's
+                    # enforced meaning — see RetryPolicy.success_cooldown).
+                    rt.next_allowed = now + self.policy.success_cooldown
                     rt.first_seen = now
             self._prune(now)
         return QuestionObservation(fingerprint=fingerprint, canonical=canonical,
@@ -575,12 +653,23 @@ class QuestionStateMachine:
         now = self._clock() if now is None else now
         rt = self.runtime()
         if rt is None:
-            return ProcessDecision(True, "new_question")
+            # Fail closed (forensic audit BUG-4): with no observed identity
+            # there is no runtime to budget, so processing must not be
+            # authorised by default. Legitimate discovery still works — the
+            # GUI observes a question (OCR or unresolved episode) before any
+            # budget is spent; see gui._process_frame.
+            return ProcessDecision(False, "no_identity")
         if rt.done:
             return ProcessDecision(False, "question_completed")
         if rt.awaiting_confirmation:
             return ProcessDecision(False, "awaiting_confirmation")
         if now >= rt.next_allowed:
+            if rt.exhausted:
+                # Budget exhausted (forensic audit BUG-3): OCR re-validation
+                # continues at the capped cadence, but the CLICK is refused
+                # downstream by the click policy while exhausted — documented
+                # contract: clicking stops until the identity changes.
+                return ProcessDecision(True, "revalidate_exhausted")
             return ProcessDecision(True, "retry_due" if rt.attempts else "first_sighting")
         return ProcessDecision(False, f"backoff_{rt.next_allowed - now:.2f}s_remaining")
 
@@ -589,16 +678,20 @@ class QuestionStateMachine:
     def record_outcome(self, outcome: str, now: Optional[float] = None,
                        answer: Optional[int] = None, source: Optional[str] = None,
                        ocr_confidence: Optional[float] = None,
-                       ml_confidence: Optional[float] = None) -> QuestionRuntime:
+                       ml_confidence: Optional[float] = None) -> Optional[QuestionRuntime]:
         now = self._clock() if now is None else now
         rt = self.runtime()
         if rt is None:
-            # Outcomes may arrive for a question never observed (defensive) —
-            # create it so nothing is silently dropped.
-            rt = QuestionRuntime(fingerprint=self._current_fp or "?", canonical="",
-                                 first_seen=now)
-            if self._current_fp:
-                self._runtime[self._current_fp] = rt
+            # Fail closed (forensic audit BUG-4): without an observed
+            # identity there is no question this outcome belongs to. The old
+            # code constructed a runtime and then silently discarded it
+            # whenever no fingerprint existed — a fail-open gate paired with
+            # a silent drop. Drop the outcome LOUDLY instead; throttled so
+            # an OCR failure storm cannot flood the log.
+            debug_throttled(
+                "qsm:outcome_no_identity",
+                f"outcome {outcome!r} dropped — no question identity observed")
+            return None
         rt.last_outcome = outcome
         rt.last_attempt = now
         if ocr_confidence is not None:

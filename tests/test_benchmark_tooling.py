@@ -77,6 +77,26 @@ def test_decode_git_output_rejects_mangled_bytes():
         bo.decode_git_output(b"\x8f\x8f", "bot_core.py at deadbeef")
 
 
+def _git_available() -> bool:
+    """Forensic-audit PART 26: these two tests exercise the benchmark's
+    baseline extraction, which legitimately drives `git show` against the
+    repository. Outside a git checkout (extracted copy, zip download) they
+    must SKIP — explicitly marked environment-specific — not fail."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=REPO,
+                           capture_output=True)
+        return r.returncode == 0
+    except OSError:
+        return False
+
+
+_requires_git = pytest.mark.skipif(
+    not _git_available(), reason="requires a git checkout (benchmark tooling "
+    "legitimately reads repository history)")
+
+
+@_requires_git
 def test_extract_baseline_source_is_strict_utf8():
     """Real extraction path: HEAD's bot_core.py comes back as a str with its
     UTF-8 punctuation intact (cp1252 would have crashed or mangled it)."""
@@ -108,6 +128,7 @@ def test_bench_dir_is_outside_repo_and_self_cleaning():
     assert not probe.exists(), "TemporaryDirectory must clean up on exit"
 
 
+@_requires_git
 def test_load_baseline_core_writes_module_only_inside_bench_dir(tmp_path):
     """The extracted baseline module goes into the given bench dir (outside
     the repo) and the working tree stays byte-for-byte untouched."""

@@ -1,5 +1,94 @@
 # Changelog
 
+## BUG-5 regression threshold made platform-robust (test-only change)
+
+### Changed
+- `tests/test_forensic_audit.py::test_bug5_ring_scan_worst_case_bounded`
+  no longer asserts the audit machine's absolute speed (`median < 3.0 ms`).
+  The first Windows verification run measured **3.52 ms** — a legitimate
+  pass behaviourally (2.8× inside the 10 ms fast-poll budget), but a red
+  test, because the old threshold accidentally encoded the Linux
+  benchmark environment rather than the architectural requirement.
+- The test now encodes the documented BUG-5 contract explicitly:
+  **hard limit = the 10 ms `FAST_MODE_POLLING` budget itself**
+  (`bot_core.py`) — detection margin 2.6× against the original ~26 ms
+  stdlib regression, headroom 2.8× against the slowest platform measured
+  so far — plus a **5.0 ms soft margin** (half the budget) that still
+  passes but emits a `RuntimeWarning`, so a ~2× platform slowdown shows
+  up in the pytest summary before it can threaten the contract. The
+  threshold rationale, all measured medians (stdlib ~26 ms, Linux numpy
+  ~0.93 ms, Windows numpy ~3.52 ms) and the sampling protocol are
+  documented in the test's docstring and
+  `docs/GLM_FORENSIC_AUDIT.md` §2 BUG-5.
+- Sampling hardened: 3 warm-up iterations, then the median of 30 timed
+  8-ring all-no-match scans (median is robust to one-off OS scheduler/GC
+  spikes); the failure message now reports min/median/max for diagnosis.
+
+### Fixed
+- Nothing — `question_state.py` is untouched. The Windows 3.52 ms median
+  demonstrated no correctness or performance defect: the numpy path keeps
+  ~2.8× headroom on the slowest environment measured, and the regression
+  class the test guards against (the ~26 ms stdlib scan) is still caught
+  decisively.
+
+## Forensic audit of a1886ec: six confirmed defects fixed, three additional findings addressed
+
+See `docs/GLM_FORENSIC_AUDIT.md` for the full evidence, ledger and
+measured before/after numbers. 130 tests (was 115).
+
+### Fixed
+- **BUG-1 (HIGH) — animation starved retries completely.** `observe_visual`
+  re-pushed the retry deadline into the future on every visual change, so
+  any screen animating faster than `same_frame_retry_delay` never reached
+  its deadline (measured: 0 attempts / 30 s vs 10 static). A visual change
+  may now only pull the deadline earlier (`min()`), never push it later.
+- **BUG-2 (HIGH) — the retry gate was bypassed on any visual change.** A
+  full EasyOCR pass ran on every poll whenever anything animated (measured:
+  101 passes / 5 s). Replaced by a signature-classified probe gate:
+  animation-level deltas stand down; genuine content changes get one
+  immediate identity probe (capped); only a genuinely new question
+  proceeds. New-question discovery stays immediate — a naive hard gate
+  would have deadlocked the quiz flow, since the gate decision belongs to
+  the previous frame's identity.
+- **BUG-3 (MED-HIGH) — "exhausted" questions clicked forever** (measured:
+  153 clicks / 600 s). The `exhausted` flag is now enforced: clicking
+  stops for that question until its identity changes, OCR re-validation
+  continues at the capped cadence, and a returning exhausted question gets
+  a fresh episode (mirroring the done rule).
+- **BUG-4 (MEDIUM) — no-identity gate failed open** and outcomes were
+  constructed then silently discarded. Fail closed now: `no_identity` is
+  refused, outcomes without identity are dropped loudly, and first-frame
+  discovery is handled by the probe path (verified by test).
+- **BUG-5 (MEDIUM) — signature worst case ~26 ms on the Tk thread.**
+  Vectorised with numpy (stdlib fallback kept, byte-identical math):
+  8-ring all-no-match p50 0.93 ms (was ~26 ms).
+- **BUG-6 (LOW) — `success_cooldown` was dead code.** Now enforced where
+  `done` no longer protects: a completed question returning as a new
+  episode waits out the cooldown before any click.
+- **NEW (HIGH) — hostile re-render churn OCR'd more than the old loop**
+  (measured 399 passes / 20 s vs the 51b16f4 loop's 200): fully re-rendered
+  frames minted a fresh immediately-allowed unresolved episode per poll.
+  Bounded by an unresolved first-look delay plus an unreadable-look probe
+  floor: now 80 / 20 s (hard 4/s = first-tier cadence), retries still never
+  starve.
+- **NEW (hygiene) — `make_new_core()` could wipe the real LUT** when the
+  benchmark module was imported instead of run (async saver + `core.lut={}`
+  before any redirect). The constructor now redirects to a temp path and
+  disables persistence itself; the shipped `optical_lut.json` is verified
+  byte-identical (md5 `a2322984…`) across the full test + benchmark chain.
+- **NEW — git-dependent tests failed red outside a checkout.** The two
+  baseline-extraction tests are now explicitly environment-specific
+  (skip without git): extracted-copy run = 128 passed, 2 skipped.
+
+### Added
+- `tests/test_forensic_audit.py` — 14 deterministic, fake-clock regression
+  tests covering every fix above (animation never starves, OCR rate floor,
+  exhaustion click-stop survives re-enable, fail-closed discovery,
+  vectorised-vs-reference distance equality, live cooldown).
+- Retry benchmark scenarios S9–S12 (animation starvation, hostile OCR
+  budget, exhausted answer, no-fingerprint) + `keypad_after_exhausted`
+  metric; benchmark logs refreshed.
+
 ## Benchmark temp hygiene: nothing temporary ever touches the working tree
 
 ### Fixed

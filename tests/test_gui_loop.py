@@ -195,6 +195,11 @@ def test_question_change_resets_retry_state(gui, core):
     run_loop_once(gui, frame)
     assert core.qsm.runtime().attempts == 1
     frame2 = frame.mutated()                     # pixels change -> new question
+    # The forensic-audit gate floors probes that follow an UNREADABLE look
+    # to same_frame_retry_delay; at +1 tick past that floor the retry gate
+    # itself opens and the new question is processed on the allowed path —
+    # discovery is immediate either way, never later than one floor window.
+    time.sleep(core.retry_policy.same_frame_retry_delay + 0.01)
     run_loop_once(gui, frame2)
     rt = core.qsm.runtime()
     assert rt.canonical == "8*2" and rt.attempts == 0

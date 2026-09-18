@@ -85,13 +85,16 @@ t_now = VCLOCK
 
 class Scenario:
     def __init__(self, name, desc, window, frame_fn, ocr_fn,
-                 clicks_enabled=True):
+                 clicks_enabled=True, no_safety_net=False):
         self.name = name
         self.desc = desc
         self.window = window
         self.frame_fn = frame_fn        # t -> FakeGrab frame
         self.ocr_fn = ocr_fn            # t -> ocr results
         self.clicks_enabled = clicks_enabled
+        # S11: disable the 3-strike safety net so the EXHAUSTION stop (not
+        # the safety net) is what ends the clicking.
+        self.no_safety_net = no_safety_net
 
 
 # NOTE: every lambda binds its frame objects via DEFAULT ARGS (f=..., g=...)
@@ -192,7 +195,74 @@ S8 = Scenario(
     ocr_fn=lambda t: _S8_GARBAGE[int(t / 0.2) % 3](),
 )
 
-SCENARIOS = [S1, S2, S3, S4, S5, S6, S7, S8]
+
+# ── S9-S12 (forensic audit PART 23): regression scenarios for the six ────────
+#    confirmed defects. Every scenario's NEW column must show the invariant
+#    named in its description.
+
+def _blink_variants(base, n):
+    """n near-identical frames (1-pixel flips): same content, new digests —
+    cursor-blink / progress-bar-level animation."""
+    return [_noise_variant(base,
+                           (i * 7) % base._arr.shape[0],
+                           (i * 13) % base._arr.shape[1])
+            for i in range(n)]
+
+
+def _hostile_frames(n):
+    """n genuinely DIFFERENT renders (video-background-level churn): every
+    digest AND every pixel signature differs from every other."""
+    return [FakeGrab(seed=900 + i) for i in range(n)]
+
+
+_S9_FRAMES = _blink_variants(FakeGrab(seed=21), 4)     # blink cycle @100 ms
+S9 = Scenario(
+    "S9 animation-starve",
+    "unsolved question on a blinking screen (near-identical frames @100 ms, "
+    "faster than same_frame_retry_delay): retries must PROCEED on schedule "
+    "(bounded by the attempt budget), never starve",
+    20.0,
+    frame_fn=lambda t: _S9_FRAMES[int(t / 0.1) % 4],
+    ocr_fn=lambda t: BAD(),
+)
+
+_S10_FRAMES = _hostile_frames(24)                      # big-delta churn @100 ms
+S10 = Scenario(
+    "S10 animation-ocr-budget",
+    "hostile screen: FULLY re-rendered frames every 100 ms (defeats "
+    "pixel-identity matching), unsolved question — OCR passes must stay "
+    "bounded by the retry schedule + probe cap, never one per poll",
+    20.0,
+    frame_fn=lambda t: _S10_FRAMES[int(t / 0.1) % 24],
+    ocr_fn=lambda t: BAD(),
+)
+
+S11 = Scenario(
+    "S11 exhausted-answer",
+    "valid question, click lands but screen NEVER confirms, safety net "
+    "disabled: after the retry budget is spent, clicking stops for this "
+    "question (forever, until its identity changes) while OCR re-validation "
+    "continues",
+    40.0,
+    frame_fn=lambda t, f=FakeGrab(seed=22): f,
+    ocr_fn=lambda t: GOOD(),
+    no_safety_net=True,
+)
+
+_S12_BLACK = FakeGrab.__new__(FakeGrab)
+_S12_BLACK._arr = np.zeros((50, 300, 4), dtype=np.uint8)
+_S12_BLACK._seed = -1
+S12 = Scenario(
+    "S12 no-fingerprint",
+    "blank/unreadable screen from the very first poll: the fail-closed gate "
+    "must still discover the unresolved identity (exactly ONE episode, no "
+    "spurious states, no clicks) and stay bounded",
+    10.0,
+    frame_fn=lambda t: _S12_BLACK,
+    ocr_fn=lambda t: [],
+)
+
+SCENARIOS = [S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12]
 
 
 # ── NEW loop driver ──────────────────────────────────────────────────────────
@@ -203,8 +273,22 @@ def make_new_core():
     # dynamically at load/save/clear time, so this core (and every async
     # save thread it spawns) can only ever touch the temp file — never the
     # repository's real optical_lut.json.
+    #
+    # Forensic-audit PART 17 hardening: main()'s redirect only exists when
+    # the benchmark is RUN. When this module is IMPORTED and make_new_core()
+    # is driven directly (as the forensic audit's own traces did), the
+    # redirect never happened — and `core.lut = {}` + the async saver then
+    # truncated the real shipped LUT to "{}" at process exit. Two defenses,
+    # so the constructor is safe in EVERY context:
+    #   1. a guaranteed temp redirect set here (main() overrides it later);
+    #   2. async persistence disabled outright — benchmarks measure
+    #      in-memory behaviour, and no daemon thread may ever touch disk.
+    import tempfile as _tempfile
+    bot_core.LUT_FILE = os.path.join(_tempfile.gettempdir(),
+                                     "mathbot_bench_lut_isolated.json")
     core = BotCore()
     core.lut = {}
+    core._save_lut_async = lambda: None
     policy = RetryPolicy()                     # production defaults
     core.retry_policy = policy
     # Explicit virtual clock: the RetryPolicy defaults bind time.monotonic
@@ -248,6 +332,13 @@ class NewDriver:
         self.click_log = click_log
         self.core = make_new_core()
         self.core.answer_clicks_enabled = scenario.clicks_enabled
+        if getattr(scenario, "no_safety_net", False):
+            # S11: the 3-strike safety net must not fire before the retry
+            # budget does, so the exhaustion stop is what ends the clicking.
+            from dataclasses import replace as _dc_replace
+            self.core.qsm.policy = _dc_replace(
+                self.core.retry_policy, unconfirmed_threshold=10 ** 9)
+            self.core.retry_policy = self.core.qsm.policy
         self.ocr_calls = {"n": 0}
 
         def readtext(arr, **kw):
@@ -271,6 +362,7 @@ class NewDriver:
 
     def run(self):
         self.ocr_times = []
+        self._keypad_at_exhausted = None      # forensic-audit S11 metric
         for t in np.arange(0, self.sc.window, 0.01):
             VCLOCK["t"] = float(t)
             frame = self.sc.frame_fn(t)
@@ -283,6 +375,10 @@ class NewDriver:
                 self.g._process_frame(frame, digest)
                 if self.ocr_calls["n"] > prev:
                     self.ocr_times.append(round(t, 3))
+                rt = self.core.qsm.runtime()
+                if (rt is not None and rt.exhausted
+                        and self._keypad_at_exhausted is None):
+                    self._keypad_at_exhausted = len(self.click_log)
 
     def metrics(self):
         c = self.core
@@ -298,6 +394,11 @@ class NewDriver:
             # identities (retry budgets) were minted. One unreadable screen
             # must produce exactly ONE.
             "question_states": len(c.qsm.snapshot()),
+            # Forensic-audit S11 metric: keypad actions delivered AFTER the
+            # retry budget was exhausted. Contract: always 0.
+            "keypad_after_exhausted": (
+                len(self.click_log) - self._keypad_at_exhausted
+                if self._keypad_at_exhausted is not None else 0),
         }
 
 
@@ -436,6 +537,10 @@ class OldDriver:
             # OLD semantics: every distinct raw reading was its own
             # "question" (raw-text identity) with a fresh implicit budget.
             "question_states": len(self.readings),
+            # The OLD loop has no exhaustion concept (it used a global
+            # kill-switch instead), so it has no post-exhaustion clicks by
+            # definition.
+            "keypad_after_exhausted": 0,
         }
 
 
@@ -577,7 +682,9 @@ def main():
                     ("submissions_confirmed", "confirmed submissions"),
                     ("keypad_beyond_confirmed",
                      "keypad actions beyond confirmed"),
-                    ("question_states", "question states")]:
+                    ("question_states", "question states"),
+                    ("keypad_after_exhausted",
+                     "keypad actions after exhausted")]:
                 print(f"{sc.name:<20} {label:<32} "
                       f"{o[metric]:>20} {n[metric]:>24}")
             print(f"{sc.name:<20} {'clicks enabled at end':<32} "

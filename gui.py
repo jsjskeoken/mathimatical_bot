@@ -27,7 +27,7 @@ from bot_core import (
     CLICK_RESULT_ERROR,
 )
 from question_state import (
-    frame_digest, semantic_fingerprint, debug_throttled,
+    frame_digest, semantic_fingerprint, debug_throttled, signature_distance,
     OUTCOME_OCR_EMPTY, OUTCOME_UNSOLVED, OUTCOME_NOT_ENABLED,
     OUTCOME_WRONG_WINDOW, OUTCOME_UNMAPPED, OUTCOME_CLICKED, OUTCOME_ERROR,
     OUTCOME_CONFIRMED, OUTCOME_UNCONFIRMED,
@@ -107,8 +107,45 @@ BTN_KINDS = {
 }
 
 
+# Forensic audit BUG-2 — how a CLOSED retry gate reacts to changed pixels.
+#
+# A visual change is a reason to LOOK sooner, not a licence to bypass the
+# retry engine: the old bypass (`if not visual_changed and not
+# decision.allowed: return`) ran a full EasyOCR pass on EVERY poll whenever
+# anything on screen animated (cursor blink, spinner, progress bar), so the
+# entire retry/backoff design never applied to animated screens.
+#
+# The gate instead distinguishes WHY the frame changed, using the same
+# aligned, dead-zoned pixel-signature machinery as unresolved-question
+# identity (measured classes: same-question noise <= 0.0043, content change
+# >= 0.0171 at the reference grid):
+#
+#   - animation-level pixel delta  -> NOT a reason to look: the retry
+#     schedule owns the look (a changed frame also pulls next_allowed in
+#     via observe_visual, so a blocked gate still opens on time).
+#   - genuine content change       -> ONE immediate identity probe; a probe
+#     that discovers a genuinely NEW question proceeds (new-question
+#     latency stays at one poll), while a probe that re-reads the SAME
+#     question or an unreadable frame stands down without spending retry
+#     budget.
+#   - adversarial bound: a hostile screen can defeat the signature gate by
+#     re-rendering with large per-frame deltas (video-like backgrounds).
+#     VISUAL_LOOK_MAX_PER_WINDOW caps same-identity probes between gate
+#     openings / state changes, so even that degenerates to a few OCR
+#     passes per backoff window instead of one per poll.
+VISUAL_LOOK_MAX_PER_WINDOW = 3
+
+
 class OpticalReaderSolverGUI:
     """Full GUI shell. Creates a BotCore, wires up callbacks, owns the main loop."""
+
+    # Pixel-signature anchor of the last look + blocked-gate probe bookkeeping
+    # (forensic audit BUG-2). Class-level defaults so the object is consistent
+    # before the first pass (and in headless test doubles).
+    _last_look_sig = None       # signature of the pixels last OCR'd/probed
+    _blocked_key = None         # (reason-prefix, fingerprint) of the closed gate
+    _blocked_looks = 0          # identity probes spent under this closed gate
+    _last_look = (None, False)  # (time of last look, was it UNREADABLE?)
 
     def __init__(self):
         self.core = BotCore()
@@ -1416,24 +1453,83 @@ class OpticalReaderSolverGUI:
 
         visual_changed = qsm.observe_visual(digest, now).changed
 
-        # Retry gate. On a visual change we always process (fresh
-        # sighting); on an unchanged frame the retry engine's schedule
-        # decides (first sighting → immediate; then backoff; exhausted
-        # questions re-validate at the capped interval only).
+        # ── Retry gate (forensic audit BUG-2). The decision below belongs
+        # to the PREVIOUS frame's identity, so when the gate is closed:
+        #   - unchanged frame -> the closed gate stands; return.
+        #   - changed frame (or no identity at all — fail-closed discovery,
+        #     e.g. first frame / after reset_round) -> look at the WHY via
+        #     the cheap pixel signature: animation-level deltas stand down;
+        #     genuine content changes get ONE immediate identity probe
+        #     (capped per closed-gate window), and only a genuinely NEW
+        #     question may proceed to solve/click. Same identity or an
+        #     unresolved reading only updates tracking — no budget spent —
+        #     and the scheduled retry still fires on time.
+        pre_fp = qsm.current_fingerprint
         decision = qsm.should_process(now)
-        if not visual_changed and not decision.allowed:
-            debug_throttled(f"gate:{decision.reason}",
-                            f"frame unchanged — processing skipped ({decision.reason})")
-            return
+        arr = None              # preprocessed frame, shared with the OCR path
+        frame_sig = None        # pixel signature of this frame (when computed)
+        forced_look = False
+        if not decision.allowed:
+            reason_key = decision.reason.split("_")[0]      # backoff/awaiting/question/no
+            if (reason_key, pre_fp) != self._blocked_key:
+                self._blocked_key = (reason_key, pre_fp)
+                self._blocked_looks = 0
+            may_probe = (visual_changed
+                         or decision.reason == "no_identity")
+            if not may_probe:
+                debug_throttled(f"gate:{decision.reason}",
+                                f"frame unchanged — processing skipped ({decision.reason})")
+                return
+            if visual_changed and pre_fp is not None:
+                # WHY did the pixels change? Cheap numpy signature — no OCR.
+                # Animation-level change: the gate stands (observe_visual
+                # already pulled the retry deadline in for a due look).
+                raw_np = np.array(sct_img)
+                arr = core.preprocess_for_ocr(raw_np)
+                frame_sig = visual_signature(arr)
+                if self._last_look_sig is not None and signature_distance(
+                        frame_sig, self._last_look_sig,
+                        qsm.policy.unresolved_min_ink,
+                        bail_below=qsm.policy.unresolved_match_threshold,
+                ) <= qsm.policy.unresolved_match_threshold:
+                    debug_throttled("gate:anim",
+                                    "visual change is animation-level — retry gate stands")
+                    return
+                # Unreadable-look floor (S10 finding): if the previous look
+                # read NOTHING canonical (hostile re-render churn mints a
+                # fresh unresolved episode per frame), probes are floored to
+                # the first retry tier — a hard OCR rate bound that no
+                # per-identity bookkeeping can defeat, because hostile
+                # frames share no identity to cap against. A look that READ
+                # something is never floored: genuine new-question discovery
+                # stays immediate.
+                last_t, last_unreadable = self._last_look
+                if (last_unreadable and last_t is not None
+                        and now - last_t < qsm.policy.same_frame_retry_delay):
+                    return
+                # Adversarial bound (video-like re-renders defeat the
+                # signature gate): cap same-identity probes per window.
+                if self._blocked_looks >= VISUAL_LOOK_MAX_PER_WINDOW:
+                    debug_throttled("gate:probe_cap",
+                                    f"identity-probe cap ({VISUAL_LOOK_MAX_PER_WINDOW}) "
+                                    f"reached for this gate window — standing down")
+                    return
+            self._blocked_looks += 1
+            forced_look = True
+        else:
+            self._blocked_key = None
+            self._blocked_looks = 0
 
         # ── Frame cache: exact pixels recently solved → answer without OCR.
         # The entry carries the SEMANTIC fingerprint it was solved under, so
         # a hit still flows through full identity + click-policy checks — a
         # completed question can never be re-clicked just because its pixels
         # reappeared (this replaces the old fragile `last_question == ""`
-        # guard). Only consulted on a visual change: on unchanged pixels the
-        # retry engine owns the decision above.
-        cached = core.frame_cache.get(digest) if visual_changed else None
+        # guard). Only consulted on a visual change or a forced identity
+        # probe: on unchanged pixels the retry engine owns the decision
+        # above.
+        cached = core.frame_cache.get(digest) if (visual_changed
+                                                  or forced_look) else None
         fingerprint = None
         rt = qsm.runtime()
         if cached is not None:
@@ -1460,8 +1556,11 @@ class OpticalReaderSolverGUI:
             answer, source = rt.answer, rt.source
         else:
             # ── OCR (new pixels, or retry due on unchanged pixels) ────────
-            raw_np = np.array(sct_img)
-            arr    = core.preprocess_for_ocr(raw_np)
+            if arr is None:            # probe gate may have preprocessed already
+                raw_np = np.array(sct_img)
+                arr = core.preprocess_for_ocr(raw_np)
+            frame_sig = visual_signature(arr)
+            self._last_look_sig = frame_sig        # anchor for the probe gate
 
             result = core.reader.readtext(
                 arr,
@@ -1492,6 +1591,9 @@ class OpticalReaderSolverGUI:
                 fingerprint = qsm.observe_unresolved(
                     visual_signature(arr), self._fingerprint_context(), now)
             qsm.observe_question(fingerprint, canonical, raw, now)
+            # (S10 floor bookkeeping) an unreadable reading floors the next
+            # closed-gate probe; a readable one never does.
+            self._last_look = (now, not bool(canonical))
 
             # ── Solve. If the machine already knows this exact question's
             # answer this round (retry path), don't re-solve — reuse it so
@@ -1506,7 +1608,25 @@ class OpticalReaderSolverGUI:
                 answer, source = None, None
 
         # ── Outcome recording + click policy (shared by OCR path and
-        # frame-cache path).
+        # frame-cache path). A forced probe must justify itself first:
+        # only a genuinely different question proceeds while the old
+        # identity's gate is closed; an unchanged identity or an unreadable
+        # frame only updates tracking — budget stays untouched until the
+        # gate opens (BUG-2 contract).
+        if forced_look:
+            if frame_sig is not None:
+                self._last_look_sig = frame_sig
+            if pre_fp is not None and (qsm.current_fingerprint == pre_fp
+                                       or answer is None):
+                # Probe did not discover a new question: show what was seen
+                # (if anything) and stand down — the retry gate stays closed
+                # and no retry budget is spent (BUG-2 contract).
+                debug_throttled("gate:probe",
+                                "identity probe: same question or unreadable — "
+                                "retry gate stays closed, no budget spent")
+                self._update_detected_display(display, answer, source=source)
+                return
+
         if answer is None:
             outcome = OUTCOME_OCR_EMPTY if not raw else OUTCOME_UNSOLVED
             qsm.record_outcome(outcome, now, ocr_confidence=conf)
@@ -1533,6 +1653,21 @@ class OpticalReaderSolverGUI:
             debug_throttled("click:awaiting",
                             "click awaiting confirmation — no further click")
             self._update_detected_display(display, answer, source=source)
+            return
+        if rt is not None and rt.exhausted:
+            # Forensic audit BUG-3 — enforce the documented contract of
+            # max_retries_per_question: after exhaustion CLICKING stops for
+            # this question (until its identity changes, which resets the
+            # flag), while OCR re-validation continues at the capped cadence
+            # (should_process reason "revalidate_exhausted"). The answer is
+            # still displayed and cached so animation never re-OCRs it.
+            debug_throttled("click:exhausted",
+                            f"answer {answer} known but retry budget exhausted — "
+                            f"not clicking (re-validation continues)")
+            self._update_detected_display(display, answer, source=source)
+            if cached is None and fingerprint:
+                core.frame_cache.put(digest, answer, source,
+                                     fingerprint, canonical)
             return
 
         click_result = core.click_answer(answer, source, norm_expr=canonical)

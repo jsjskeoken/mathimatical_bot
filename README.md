@@ -6,6 +6,12 @@ the on-screen keypad. It is built around a layered question state machine so
 that animated screens, OCR flicker and repeated frames cannot cause duplicate
 submissions, click-spam, or permanently stuck questions.
 
+The current tree is the **post-audit state of the redesign commit
+(`a1886ec`)**: a forensic audit confirmed nine defects in the redesigned
+loop, and all nine are fixed and pinned by deterministic regression tests
+(130 tests — see [Forensic audit](#forensic-audit-nine-defects-confirmed-fixed-regression-tested)
+below and `docs/GLM_FORENSIC_AUDIT.md`).
+
 ## Platform requirements
 
 - **Windows only.** Capture, click automation and DPI awareness go through
@@ -98,7 +104,11 @@ animated ones. `question_state.py` now separates the layers explicitly
   0.25 s, then 0.5 s base with ×2 backoff capped at 4 s, at most 8
   processing/click retries per question. An unchanged frame is *always*
   revalidated on schedule — retries are never suppressed just because the
-  pixels stayed the same.
+  pixels stayed the same — and a visual change may only *pull* the next
+  retry earlier, never postpone it (an audited invariant: the pre-audit
+  code let animated screens starve retries indefinitely). Visual churn is
+  first classified by the pixel signature, so animation-level deltas stand
+  down instead of forcing a full OCR pass on every poll.
 - **Click confirmation** — after a click, the pixel digest must change
   within 0.5 s or the click counts as unconfirmed. **Three consecutive
   unconfirmed clicks trip the safety net**: answer clicking disables itself
@@ -164,33 +174,87 @@ the replacement is in the solver's grammar, and the result still solves.
   artefacts (`ml_model/`, `ml_dataset*/`) are local build outputs and are
   gitignored.
 
+## Forensic audit: nine defects confirmed, fixed, regression-tested
+
+Before shipping, the redesigned loop (`a1886ec`) went through a full
+forensic audit. Every suspected defect was reproduced against the real
+implementation under a virtual clock, measured, fixed, and pinned by a
+regression test; suspicions that did not reproduce were written up and
+disproved rather than silently dropped. The full evidence — reproduction
+logs, the adversarial test matrix, disproved suspicions and per-fix
+before/after numbers — is in `docs/GLM_FORENSIC_AUDIT.md`; the
+change-by-change narrative is in `CHANGELOG.md`. The ledger:
+
+| ID | Severity | Defect (measured on a1886ec) | Fix |
+|---|---|---|---|
+| BUG-1 | HIGH | Any visual change re-pushed the retry deadline, so animated screens never retried (0 attempts / 30 s vs 10 static) | A visual change may only *pull* the deadline earlier (`min()`); exhausted/done excluded |
+| BUG-2 | HIGH | A visual change bypassed the retry gate entirely — a full OCR pass ran on every poll while anything animated (101 passes / 5 s) | Signature-classified probe gate + `VISUAL_LOOK_MAX_PER_WINDOW` cap; new-question discovery stays immediate |
+| BUG-3 | MED-HIGH | "Exhausted" questions kept clicking forever (153 clicks / 600 s) | `exhausted` click-stop enforced; a returning exhausted question gets a fresh episode |
+| BUG-4 | MEDIUM | A missing question identity failed *open*; outcomes were constructed then silently discarded | Fail-closed `no_identity` refusal + loud drop; first-frame discovery handled by the probe path |
+| BUG-5 | MEDIUM | Signature worst case ~26 ms on the Tk main thread — 2.6× the 10 ms fast-poll budget | numpy-vectorised distance (stdlib fallback kept, byte-identical math): 8-ring p50 0.93 ms Linux / 3.52 ms Windows |
+| BUG-6 | LOW | `success_cooldown` was dead code | Enforced when a completed question reappears as a new episode |
+| NEW-A | HIGH | Hostile full re-render churn OCR'd *more* than the pre-redesign loop (~400 vs 200 passes / 20 s) | Unresolved first-look delay + unreadable-look probe floor: 80 / 20 s (hard 4/s floor), retries never starve |
+| NEW-B | hygiene | `make_new_core()` (benchmark import path) could overwrite the real `optical_lut.json` | Constructor redirects `LUT_FILE` itself; shipped LUT verified byte-identical (md5 `a2322984…`) across the full chain |
+| NEW-C | hygiene | Two tests required a git checkout and failed red in a ZIP download | `_requires_git` skip marks: 128 passed + 2 skipped without git |
+
+All nine are covered by `tests/test_forensic_audit.py` and retry-benchmark
+scenarios S9–S12. As required, the audit left the OCR pipeline untouched:
+the 65-case corpus scores 65/65 both before and after. The performance
+contract for the vectorised signature scan is spelled out in the Tests &
+benchmarks section below.
+
 ## Tests & benchmarks
 
 ```bash
-python -m pytest tests/ -q            # 115 tests
+python -m pytest tests/ -q            # 130 tests
 python benchmarks/benchmark_ocr.py --baseline 51b16f4
 python benchmarks/benchmark_retry.py
 ```
 
-- `tests/` — 115 tests: the preserved OCR regression corpus (17 fixes),
+- `tests/` — 130 tests: the preserved OCR regression corpus (17 fixes),
   retry-engine timing, GUI loop behaviour (pause/preview/switch
-  independence/safety net), ML gates, the unresolved-identity suite, and
-  the benchmark tooling's Windows-safety contract (UTF-8 git output) and
+  independence/safety net), ML gates, the unresolved-identity suite, the
+  benchmark tooling's Windows-safety contract (UTF-8 git output) and
   temp-hygiene guarantee (nothing temporary ever touches the working
-  tree).
+  tree), plus `tests/test_forensic_audit.py` — 14 deterministic,
+  fake-clock regressions, one per confirmed audit defect (deadline
+  pull-in invariant, probe gate, exhausted click-stop, fail-closed
+  discovery, vectorised-vs-reference distance equality, live cooldown,
+  hostile-churn bound).
   Windows-specific pieces (`easyocr`, `mss`, `pynput`, `pyautogui`) are
-  stubbed, so the suite runs on any OS.
+  stubbed, so the suite runs on any OS. The two baseline-extraction tests
+  are explicitly git-dependent (`_requires_git`) and skip cleanly outside
+  a checkout: a ZIP download without `.git/` yields **128 passed +
+  2 skipped**, never red.
+- **The one real-time assertion — the BUG-5 performance contract.**
+  `test_bug5_ring_scan_worst_case_bounded` re-measures the 8-ring
+  all-no-match worst case of `signature_distance()` (3 warm-ups, then the
+  median of 30 timed scans — robust to one-off scheduler/GC spikes) and
+  requires it to fit **inside the 10 ms `FAST_MODE_POLLING` budget** the
+  scan shares on the Tk main thread. A median of 5–10 ms still passes but
+  emits a `RuntimeWarning` (half-budget soft margin), so a ~2× platform
+  slowdown becomes visible in the pytest summary long before it can
+  threaten the contract. The threshold encodes the architectural budget,
+  deliberately not any one machine's speed: measured medians are ~26 ms
+  for the pre-audit stdlib path (the bug — fails decisively), ~0.93 ms on
+  Linux and ~3.52 ms on Windows (the slowest environment measured so far,
+  2.8× headroom). Rationale and protocol are documented in the test's
+  docstring and `docs/GLM_FORENSIC_AUDIT.md` §2 BUG-5.
 - `benchmarks/benchmark_ocr.py` — a **65-case synthetic OCR token corpus**
   (rendered/glued/misread token fixtures, not screenshots). Current tree:
   **65/65** vs **45/65** at baseline `51b16f4`. **This is a synthetic
   benchmark of the text-cleanup stages — it is not a real-world OCR
   accuracy figure.** Raw logs in `docs/benchmark-logs/`.
-- `benchmarks/benchmark_retry.py` — 8 virtual-clock scenarios (frozen
-  screen, animation, OCR flicker, question change, garbage flicker, …)
-  comparing the old loop reconstruction against the current one, e.g.
-  animation duplicate submissions 39 → 1, alternating-wrong submissions
-  59 → 2, and one constant identity for unreadable garbage → correct
-  per-question episodes.
+- `benchmarks/benchmark_retry.py` — 12 virtual-clock scenarios S1–S12
+  (frozen screen, animation, OCR flicker, question change, garbage
+  flicker, … plus the audit additions: animation starvation, hostile
+  re-render churn, exhausted answer, no-fingerprint) comparing the old
+  loop reconstruction against the current one. Example rows: animation
+  duplicate submissions 39 → 1, alternating-wrong submissions 59 → 2,
+  animation starvation 200 → 13 OCR passes/20 s, hostile churn ~400 → 80
+  (a1886ec was *worse* than the old loop here), exhausted questions click
+  153 → 0 times/600 s, and one constant identity for unreadable garbage →
+  correct per-question episodes.
 
 ## Known limitations
 
@@ -211,9 +275,13 @@ python benchmarks/benchmark_retry.py
   input; recognition quality, click reliability and overlay rendering on a
   real Windows machine still need a validation pass, and the retry/TTL
   constants may want tuning against real app timings.
-- Screen automation like this may violate the terms of service of whatever
-  application it is pointed at; treat it as a reference implementation for
-  the techniques.
+- **Educational purposes only.** This bot was built as a school project
+  and is published as a reference implementation of the techniques
+  involved (screen capture, OCR noise handling, layered retry state
+  machines, Windows input automation). Screen automation may violate the
+  terms of service of whatever application it is pointed at — point it
+  only at material you are allowed to automate, and treat everything here
+  as course work, not as a tool to gain an unfair advantage.
 
 ## Files
 
@@ -231,4 +299,5 @@ python benchmarks/benchmark_retry.py
 | `optical_lut.json` | Persistent expression → answer lookup table (runtime-maintained cache) |
 | `optical_coords.json` | Saved coordinate profiles (machine-specific) |
 | `launch_solver.bat` | Windows launcher — finds Python 3.10–3.13, installs missing deps |
-| `tests/`, `benchmarks/`, `docs/` | Test suite, reproducible benchmarks, design report + raw benchmark logs |
+| `docs/GLM_FORENSIC_AUDIT.md` | The full forensic audit of the a1886ec redesign — reproductions, 9-defect ledger, before/after measurements |
+| `tests/`, `benchmarks/`, `docs/` | Test suite (130), reproducible benchmarks, design report + audit + raw benchmark logs |

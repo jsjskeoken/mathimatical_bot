@@ -100,6 +100,7 @@ class FakeGrab:
     """mss-shaped frame: BGRA buffer + size, numpy-viewable."""
 
     def __init__(self, w=300, h=50, seed=0, invert=False):
+        self._seed = seed
         rng = np.random.default_rng(seed)
         arr = (rng.random((h, w, 4)) * 255).astype(np.uint8)
         if invert:
@@ -123,10 +124,16 @@ class FakeGrab:
         return out
 
     def mutated(self):
-        """A copy guaranteed to produce a different digest."""
+        """A copy representing NEW SCREEN CONTENT: digest differs (layer A)
+        AND the question-region rendering differs far beyond animation-level
+        pixel noise, so the forensic-audit probe gate (gui._process_frame)
+        treats it as a genuine content change — which is what every test
+        using mutated() means by it. (The old single-pixel flip simulated
+        exactly the animation the new gate must IGNORE.)"""
         clone = FakeGrab.__new__(FakeGrab)
-        clone._arr = self._arr.copy()
-        clone._arr[0, 0, 0] ^= 0xFF
+        clone._seed = self._seed ^ 0x9E3779B9
+        rng = np.random.default_rng(clone._seed)
+        clone._arr = (rng.random(self._arr.shape) * 255).astype(np.uint8)
         return clone
 
 

@@ -390,7 +390,26 @@ def test_runtime_pruning_keeps_current_drops_oldest():
 
 
 def test_record_outcome_without_observed_question_is_safe():
-    """Defensive: an outcome for a question never observed must not crash."""
+    """Forensic audit BUG-4 (updated contract): an outcome for a question
+    never observed must not crash, must NOT be stored, and must not mint a
+    runtime. The old behaviour built a runtime and silently discarded it
+    whenever no fingerprint existed (fail-open gate + silent drop); the
+    fail-closed machine drops the outcome loudly instead."""
     m, ck = make_machine()
     rt = m.record_outcome(OUTCOME_OCR_EMPTY, ck())
-    assert rt is not None
+    assert rt is None                    # nothing constructed-and-discarded
+    assert len(m._runtime) == 0          # nothing stored
+    assert m.should_process(ck()).reason == "no_identity"
+
+
+def test_should_process_without_identity_fails_closed():
+    """Forensic audit BUG-4: with no observed identity the gate must fail
+    CLOSED — no runtime means no budget, so processing is not authorised."""
+    m, ck = make_machine()
+    dec = m.should_process(ck())
+    assert not dec.allowed and dec.reason == "no_identity"
+    # and after a reset_round (identity wiped) it stays closed
+    m.observe_question("fp1", "7+6", "7+6", ck())
+    m.reset_round()
+    dec = m.should_process(ck())
+    assert not dec.allowed and dec.reason == "no_identity"
